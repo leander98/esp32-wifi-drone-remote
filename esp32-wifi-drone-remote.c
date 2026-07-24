@@ -7,10 +7,13 @@
 #include <esp_http_server.h>
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_system.h>
 #include <esp_wifi.h>
 #include <esp_wifi_default.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/task.h>
+#include <nvs.h>
 #include <nvs_flash.h>
 
 #include "esp32-wifi-drone-remote.h"
@@ -25,9 +28,13 @@ static esp_event_handler_instance_t s_ip_handler;
 static esp_netif_t *s_netif;
 static httpd_handle_t s_server;
 static bool s_started;
+static char s_saved_station_ssid[33];
+static char s_saved_station_password[65];
 
 extern const uint8_t controller_html_start[]
     asm("_binary_controller_html_start");
+extern const uint8_t wifi_setup_html_start[]
+    asm("_binary_wifi_setup_html_start");
 
 /**
  * @brief Process Wi-Fi station lifecycle events.
@@ -71,6 +78,207 @@ static esp_err_t page_handler(httpd_req_t *request)
 }
 
 /**
+ * @brief Serve the embedded station configuration page.
+ *
+ * @param request HTTP GET request for `/wifi`.
+ * @return ESP_OK when the response is sent, otherwise an HTTP-server error.
+ */
+static esp_err_t wifi_setup_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    return httpd_resp_send(request, (const char *)wifi_setup_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/**
+ * @brief Convert a hexadecimal URL-encoding digit to its numeric value.
+ *
+ * @param character ASCII hexadecimal character.
+ * @return Value from 0 through 15, or -1 when the character is invalid.
+ */
+static int url_hex_value(char character)
+{
+    if (character >= '0' && character <= '9') {
+        return character - '0';
+    }
+    if (character >= 'a' && character <= 'f') {
+        return character - 'a' + 10;
+    }
+    if (character >= 'A' && character <= 'F') {
+        return character - 'A' + 10;
+    }
+    return -1;
+}
+
+/**
+ * @brief Decode an application/x-www-form-urlencoded value in place.
+ *
+ * @param value Null-terminated encoded value to decode.
+ * @return ESP_OK on success or ESP_ERR_INVALID_ARG for malformed `%XX` data.
+ */
+static esp_err_t url_decode(char *value)
+{
+    char *source = value;
+    char *destination = value;
+
+    while (*source != '\0') {
+        if (*source == '+') {
+            *destination++ = ' ';
+            ++source;
+        } else if (*source == '%') {
+            if (source[1] == '\0' || source[2] == '\0') {
+                return ESP_ERR_INVALID_ARG;
+            }
+            int high = url_hex_value(source[1]);
+            int low = url_hex_value(source[2]);
+            if (high < 0 || low < 0) {
+                return ESP_ERR_INVALID_ARG;
+            }
+            *destination++ = (char)((high << 4) | low);
+            source += 3;
+        } else {
+            *destination++ = *source++;
+        }
+    }
+    *destination = '\0';
+    return ESP_OK;
+}
+
+/**
+ * @brief Restart the ESP32 after allowing the HTTP response to reach the phone.
+ *
+ * @param context Unused task context.
+ */
+static void delayed_restart_task(void *context)
+{
+    (void)context;
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_restart();
+}
+
+/**
+ * @brief Store submitted station credentials and schedule a restart.
+ *
+ * The browser sends URL-encoded `ssid` and `password` fields. Credentials are
+ * persisted in NVS and take precedence over menuconfig station credentials on
+ * the next boot.
+ *
+ * @param request HTTP POST request for `/api/wifi-config`.
+ * @return ESP_OK after responding, otherwise an ESP-IDF or HTTP-server error.
+ */
+static esp_err_t wifi_config_handler(httpd_req_t *request)
+{
+    /* URL encoding can expand every input byte to a three-byte %XX token. */
+    char body[320];
+    char ssid[sizeof(s_saved_station_ssid) * 3U];
+    char password[sizeof(s_saved_station_password) * 3U];
+
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid form size");
+    }
+
+    size_t received_total = 0U;
+    while (received_total < request->content_len) {
+        int received = httpd_req_recv(
+            request, body + received_total,
+            request->content_len - received_total);
+        if (received <= 0) {
+            return ESP_FAIL;
+        }
+        received_total += (size_t)received;
+    }
+    body[received_total] = '\0';
+
+    if (httpd_query_key_value(body, "ssid", ssid, sizeof(ssid)) != ESP_OK ||
+        httpd_query_key_value(body, "password", password,
+                              sizeof(password)) != ESP_OK ||
+        url_decode(ssid) != ESP_OK || url_decode(password) != ESP_OK ||
+        ssid[0] == '\0' ||
+        strlen(ssid) >= sizeof(s_saved_station_ssid) ||
+        strlen(password) >= sizeof(s_saved_station_password)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid Wi-Fi credentials");
+    }
+
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open("drone_remote", NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "sta_ssid", ssid);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "sta_password", password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    if (nvs != 0) {
+        nvs_close(nvs);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not save station credentials: %s",
+                 esp_err_to_name(err));
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Could not save Wi-Fi credentials");
+    }
+
+    httpd_resp_set_type(request, "application/json");
+    err = httpd_resp_sendstr(request, "{\"saved\":true}");
+    if (err == ESP_OK &&
+        xTaskCreate(delayed_restart_task, "wifi-restart", 2048, NULL, 5,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create restart task");
+    }
+    return err;
+}
+
+/**
+ * @brief Override compile-time station credentials with values stored in NVS.
+ *
+ * Missing or invalid saved values are ignored, leaving the supplied runtime
+ * configuration unchanged.
+ *
+ * @param config Runtime configuration supplied by the application.
+ * @param effective Destination configuration used for Wi-Fi startup.
+ */
+static void apply_saved_station_config(
+    const esp32_wifi_drone_remote_config_t *config,
+    esp32_wifi_drone_remote_config_t *effective)
+{
+    *effective = *config;
+
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open("drone_remote", NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return;
+    }
+
+    size_t ssid_size = sizeof(s_saved_station_ssid);
+    size_t password_size = sizeof(s_saved_station_password);
+    err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
+    if (err == ESP_OK) {
+        err = nvs_get_str(nvs, "sta_password", s_saved_station_password,
+                          &password_size);
+        if (err == ESP_ERR_NVS_NOT_FOUND) {
+            s_saved_station_password[0] = '\0';
+            err = ESP_OK;
+        }
+    }
+    nvs_close(nvs);
+
+    if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
+        effective->station_ssid = s_saved_station_ssid;
+        effective->station_password = s_saved_station_password;
+        ESP_LOGI(TAG, "Using station credentials saved from the setup page");
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Ignoring invalid saved station credentials: %s",
+                 esp_err_to_name(err));
+    }
+}
+
+/**
  * @brief Consume a controller request without performing an action.
  *
  * Every controller endpoint currently uses this placeholder. Request bodies
@@ -106,8 +314,8 @@ static esp_err_t api_handler(httpd_req_t *request)
 static esp_err_t start_webserver(void)
 {
     static const char *api_paths[] = {
-        "/api/connect", "/api/settings", "/api/turn-lock", "/api/brightness",
-        "/api/headlight", "/api/sound", "/api/left-stick", "/api/right-stick",
+        "/api/settings", "/api/turn-lock", "/api/brightness", "/api/headlight",
+        "/api/sound", "/api/left-stick", "/api/right-stick",
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.max_uri_handlers = 12;
@@ -121,6 +329,24 @@ static esp_err_t start_webserver(void)
         .uri = "/", .method = HTTP_GET, .handler = page_handler
     };
     err = httpd_register_uri_handler(s_server, &page);
+
+    const httpd_uri_t wifi_page = {
+        .uri = "/wifi",
+        .method = HTTP_GET,
+        .handler = wifi_setup_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &wifi_page);
+    }
+
+    const httpd_uri_t wifi_config = {
+        .uri = "/api/wifi-config",
+        .method = HTTP_POST,
+        .handler = wifi_config_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &wifi_config);
+    }
 
     for (size_t i = 0; err == ESP_OK &&
          i < sizeof(api_paths) / sizeof(api_paths[0]); ++i) {
@@ -275,6 +501,9 @@ esp_err_t esp32_wifi_drone_remote_start(
         return err;
     }
 
+    esp32_wifi_drone_remote_config_t effective_config;
+    apply_saved_station_config(config, &effective_config);
+
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
         esp_wifi_deinit();
@@ -295,17 +524,17 @@ esp_err_t esp32_wifi_drone_remote_start(
         return err;
     }
 
-    if (config->station_ssid[0] != '\0') {
-        err = start_station(config);
+    if (effective_config.station_ssid[0] != '\0') {
+        err = start_station(&effective_config);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Station connection failed; starting access point");
             esp_wifi_stop();
             esp_netif_destroy_default_wifi(s_netif);
             s_netif = NULL;
-            err = start_access_point(config);
+            err = start_access_point(&effective_config);
         }
     } else {
-        err = start_access_point(config);
+        err = start_access_point(&effective_config);
     }
 
     if (err == ESP_OK) {

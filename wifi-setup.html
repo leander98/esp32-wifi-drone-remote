@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>Drone Remote Wi-Fi Setup</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color-scheme: light; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100dvh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+      background: #eef2f7;
+      color: #18212f;
+    }
+    main {
+      width: min(100%, 430px);
+      padding: 24px;
+      border-radius: 18px;
+      background: white;
+      box-shadow: 0 12px 40px #18212f22;
+    }
+    h1 { margin: 0 0 8px; font-size: 1.55rem; }
+    p { color: #566274; line-height: 1.45; }
+    label { display: block; margin-top: 18px; font-weight: 700; }
+    input {
+      width: 100%;
+      min-height: 48px;
+      margin-top: 7px;
+      padding: 10px 12px;
+      border: 1px solid #aab3c0;
+      border-radius: 10px;
+      font: inherit;
+      font-size: 16px;
+    }
+    button, a {
+      display: inline-grid;
+      place-items: center;
+      min-height: 48px;
+      padding: 10px 16px;
+      border: 0;
+      border-radius: 10px;
+      font: inherit;
+      font-weight: 750;
+      text-decoration: none;
+      cursor: pointer;
+    }
+    .actions { display: flex; gap: 10px; margin-top: 22px; }
+    button { flex: 1; background: #e63946; color: white; }
+    a { background: #e3e8ef; color: #18212f; }
+    #status { min-height: 24px; margin-bottom: 0; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Connect to Wi-Fi</h1>
+    <p>
+      Enter the network the ESP32 should join. The controller will restart
+      after saving. If the connection fails, its own access point returns.
+    </p>
+    <form id="wifi-form">
+      <label for="ssid">Network name</label>
+      <input id="ssid" name="ssid" maxlength="32" autocomplete="off" required>
+
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" maxlength="64"
+             autocomplete="current-password">
+
+      <div class="actions">
+        <a href="/">Cancel</a>
+        <button type="submit">Save and connect</button>
+      </div>
+      <p id="status" role="status"></p>
+    </form>
+  </main>
+  <script>
+    const form = document.querySelector("#wifi-form");
+    const status = document.querySelector("#status");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const button = form.querySelector("button");
+      button.disabled = true;
+      status.textContent = "Saving configuration…";
+      try {
+        const response = await fetch("/api/wifi-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          body: new URLSearchParams(new FormData(form)),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        status.textContent =
+          "Saved. The ESP32 is restarting; reconnect to the configured network.";
+      } catch (error) {
+        status.textContent = `Could not save: ${error.message}`;
+        button.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
