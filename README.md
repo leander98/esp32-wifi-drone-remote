@@ -81,6 +81,7 @@ The page sends JSON `POST` requests to these endpoints:
 | `/api/right-stick` | Direction stick |
 | `/api/wifi-config` | Saves station credentials and schedules a restart |
 | `/api/telemetry` | Returns application-provided accelerometer and gyroscope vectors |
+| `/api/imu-config` | Reads or applies application-provided IMU settings |
 
 Stick request bodies have the form `{"x": 0.0, "y": 0.0}`, with both values
 normalized to the range -1 through 1.
@@ -128,3 +129,9 @@ accelerometer and gyroscope XYZ values. The browser polls `/api/telemetry` at
 10 Hz and performs complementary-filter attitude estimation and artificial
 horizon rendering entirely on the client. If no provider is configured, the
 endpoint returns HTTP 503.
+
+The ISM330DLC settings submenu provides Normal, Slow, High-speed, and Custom
+acquisition modes. Every accelerometer/gyroscope data rate and full-scale
+range is also selectable independently. Applications configure
+`imu_get_handler`, `imu_set_handler`, and `imu_context`; the Wi-Fi component
+does not depend directly on a particular IMU driver.

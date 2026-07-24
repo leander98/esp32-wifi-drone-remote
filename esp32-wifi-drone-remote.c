@@ -42,6 +42,9 @@ static void *s_latency_context;
 static uint32_t s_latency_timeout_ms = 150U;
 static esp32_wifi_drone_remote_telemetry_handler_t s_telemetry_handler;
 static void *s_telemetry_context;
+static esp32_wifi_drone_remote_imu_get_handler_t s_imu_get_handler;
+static esp32_wifi_drone_remote_imu_set_handler_t s_imu_set_handler;
+static void *s_imu_context;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
 static char s_saved_ap_ssid[33];
@@ -56,6 +59,8 @@ extern const uint8_t settings_html_start[]
     asm("_binary_settings_html_start");
 extern const uint8_t wifi_ap_settings_html_start[]
     asm("_binary_wifi_ap_settings_html_start");
+extern const uint8_t imu_settings_html_start[]
+    asm("_binary_imu_settings_html_start");
 
 /**
  * @brief Advertise the controller through multicast DNS.
@@ -154,6 +159,16 @@ static esp_err_t ap_settings_page_handler(httpd_req_t *request)
     httpd_resp_set_hdr(request, "Cache-Control",
                        "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)wifi_ap_settings_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the embedded ISM330DLC settings page. */
+static esp_err_t imu_settings_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)imu_settings_html_start,
                            HTTPD_RESP_USE_STRLEN);
 }
 
@@ -275,6 +290,80 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, response, length);
+}
+
+/** @brief Return current application-provided IMU acquisition settings. */
+static esp_err_t imu_config_get_handler(httpd_req_t *request)
+{
+    if (s_imu_get_handler == NULL) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, "IMU settings API is not configured");
+    }
+    esp32_wifi_drone_remote_imu_config_t config;
+    esp_err_t err = s_imu_get_handler(&config, s_imu_context);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, esp_err_to_name(err));
+    }
+    char response[128];
+    int length = snprintf(
+        response, sizeof(response),
+        "{\"accel_odr\":%u,\"gyro_odr\":%u,"
+        "\"accel_scale\":%u,\"gyro_scale\":%u}",
+        config.accelerometer_odr, config.gyroscope_odr,
+        config.accelerometer_full_scale, config.gyroscope_full_scale);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
+}
+
+/** @brief Validate and dispatch submitted IMU acquisition settings. */
+static esp_err_t imu_config_post_handler(httpd_req_t *request)
+{
+    char body[128];
+    char accel_odr[4], gyro_odr[4], accel_scale[3], gyro_scale[3];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid IMU settings");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+    if (httpd_query_key_value(body, "accel_odr", accel_odr,
+                              sizeof(accel_odr)) != ESP_OK ||
+        httpd_query_key_value(body, "gyro_odr", gyro_odr,
+                              sizeof(gyro_odr)) != ESP_OK ||
+        httpd_query_key_value(body, "accel_scale", accel_scale,
+                              sizeof(accel_scale)) != ESP_OK ||
+        httpd_query_key_value(body, "gyro_scale", gyro_scale,
+                              sizeof(gyro_scale)) != ESP_OK) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid IMU settings");
+    }
+    esp32_wifi_drone_remote_imu_config_t config = {
+        .accelerometer_odr = (uint8_t)atoi(accel_odr),
+        .gyroscope_odr = (uint8_t)atoi(gyro_odr),
+        .accelerometer_full_scale = (uint8_t)atoi(accel_scale),
+        .gyroscope_full_scale = (uint8_t)atoi(gyro_scale),
+    };
+    if (config.accelerometer_odr > 10U || config.gyroscope_odr > 10U ||
+        config.accelerometer_full_scale > 3U ||
+        config.gyroscope_full_scale > 3U ||
+        s_imu_set_handler == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Unsupported IMU settings");
+    }
+    esp_err_t err = s_imu_set_handler(&config, s_imu_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
 }
 
 /**
@@ -674,7 +763,7 @@ static esp_err_t start_webserver(void)
         "/api/sound", "/api/left-stick", "/api/right-stick",
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 20;
+    config.max_uri_handlers = 24;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -713,6 +802,15 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &ap_settings_page);
     }
 
+    const httpd_uri_t imu_settings_page = {
+        .uri = "/settings/imu",
+        .method = HTTP_GET,
+        .handler = imu_settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &imu_settings_page);
+    }
+
     const httpd_uri_t wifi_config = {
         .uri = "/api/wifi-config",
         .method = HTTP_POST,
@@ -747,6 +845,24 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &telemetry);
+    }
+
+    const httpd_uri_t imu_config_get = {
+        .uri = "/api/imu-config",
+        .method = HTTP_GET,
+        .handler = imu_config_get_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &imu_config_get);
+    }
+
+    const httpd_uri_t imu_config_post = {
+        .uri = "/api/imu-config",
+        .method = HTTP_POST,
+        .handler = imu_config_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &imu_config_post);
     }
 
     const httpd_uri_t ap_config_get = {
@@ -941,6 +1057,9 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_latency_timeout_ms = effective_config.latency_timeout_ms;
     s_telemetry_handler = effective_config.telemetry_handler;
     s_telemetry_context = effective_config.telemetry_context;
+    s_imu_get_handler = effective_config.imu_get_handler;
+    s_imu_set_handler = effective_config.imu_set_handler;
+    s_imu_context = effective_config.imu_context;
 
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
@@ -1028,6 +1147,9 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_latency_timeout_ms = 150U;
     s_telemetry_handler = NULL;
     s_telemetry_context = NULL;
+    s_imu_get_handler = NULL;
+    s_imu_set_handler = NULL;
+    s_imu_context = NULL;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
 }

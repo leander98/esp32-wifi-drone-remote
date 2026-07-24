@@ -69,6 +69,29 @@ typedef esp_err_t (*esp32_wifi_drone_remote_telemetry_handler_t)(
     void *context);
 
 /**
+ * @brief Generic runtime IMU acquisition settings exposed by the web UI.
+ *
+ * Values use the ISM330DLC register encodings so an application can map them
+ * directly to its driver enums.
+ */
+typedef struct {
+    uint8_t accelerometer_odr;
+    uint8_t gyroscope_odr;
+    uint8_t accelerometer_full_scale;
+    uint8_t gyroscope_full_scale;
+} esp32_wifi_drone_remote_imu_config_t;
+
+/** @brief Read the currently active IMU settings. */
+typedef esp_err_t (*esp32_wifi_drone_remote_imu_get_handler_t)(
+    esp32_wifi_drone_remote_imu_config_t *config,
+    void *context);
+
+/** @brief Validate and apply settings submitted by the IMU settings page. */
+typedef esp_err_t (*esp32_wifi_drone_remote_imu_set_handler_t)(
+    const esp32_wifi_drone_remote_imu_config_t *config,
+    void *context);
+
+/**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
 typedef struct {
@@ -100,6 +123,12 @@ typedef struct {
     esp32_wifi_drone_remote_telemetry_handler_t telemetry_handler;
     /** Application value passed to telemetry_handler. */
     void *telemetry_context;
+    /** Optional callback returning current IMU settings. */
+    esp32_wifi_drone_remote_imu_get_handler_t imu_get_handler;
+    /** Optional callback applying submitted IMU settings. */
+    esp32_wifi_drone_remote_imu_set_handler_t imu_set_handler;
+    /** Application value passed to both IMU settings callbacks. */
+    void *imu_context;
 } esp32_wifi_drone_remote_config_t;
 
 /**
@@ -121,6 +150,9 @@ typedef struct {
         .latency_timeout_ms = 150,                                      \
         .telemetry_handler = NULL,                                      \
         .telemetry_context = NULL,                                      \
+        .imu_get_handler = NULL,                                        \
+        .imu_set_handler = NULL,                                        \
+        .imu_context = NULL,                                            \
     }
 
 /**
