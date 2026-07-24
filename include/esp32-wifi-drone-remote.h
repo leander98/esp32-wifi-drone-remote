@@ -44,6 +44,31 @@ typedef void (*esp32_wifi_drone_remote_latency_handler_t)(
     void *context);
 
 /**
+ * @brief IMU values consumed by the browser telemetry display.
+ */
+typedef struct {
+    float acceleration_x;
+    float acceleration_y;
+    float acceleration_z;
+    float gyroscope_x;
+    float gyroscope_y;
+    float gyroscope_z;
+} esp32_wifi_drone_remote_telemetry_t;
+
+/**
+ * @brief Supply the latest IMU values for a telemetry HTTP request.
+ *
+ * The callback runs in the HTTP server task and must return quickly.
+ *
+ * @param telemetry Destination populated by the application.
+ * @param context Application context from the component configuration.
+ * @return ESP_OK when telemetry is available, otherwise an ESP-IDF error.
+ */
+typedef esp_err_t (*esp32_wifi_drone_remote_telemetry_handler_t)(
+    esp32_wifi_drone_remote_telemetry_t *telemetry,
+    void *context);
+
+/**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
 typedef struct {
@@ -71,6 +96,10 @@ typedef struct {
     void *latency_context;
     /** Latency above this value is reported as a timeout. */
     uint32_t latency_timeout_ms;
+    /** Optional callback supplying accelerometer and gyroscope values. */
+    esp32_wifi_drone_remote_telemetry_handler_t telemetry_handler;
+    /** Application value passed to telemetry_handler. */
+    void *telemetry_context;
 } esp32_wifi_drone_remote_config_t;
 
 /**
@@ -90,6 +119,8 @@ typedef struct {
         .latency_handler = NULL,                                        \
         .latency_context = NULL,                                        \
         .latency_timeout_ms = 150,                                      \
+        .telemetry_handler = NULL,                                      \
+        .telemetry_context = NULL,                                      \
     }
 
 /**

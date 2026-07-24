@@ -80,6 +80,7 @@ The page sends JSON `POST` requests to these endpoints:
 | `/api/left-stick` | Throttle/turn stick |
 | `/api/right-stick` | Direction stick |
 | `/api/wifi-config` | Saves station credentials and schedules a restart |
+| `/api/telemetry` | Returns application-provided accelerometer and gyroscope vectors |
 
 Stick request bodies have the form `{"x": 0.0, "y": 0.0}`, with both values
 normalized to the range -1 through 1.
@@ -121,3 +122,9 @@ Set `latency_handler`, `latency_context`, and `latency_timeout_ms` in the same
 configuration structure to receive browser round-trip samples. The callback
 receives the latency and a boolean indicating whether the threshold was
 exceeded, allowing flight-control timeout behavior to be added externally.
+
+Set `telemetry_handler` and `telemetry_context` to provide the most recent
+accelerometer and gyroscope XYZ values. The browser polls `/api/telemetry` at
+10 Hz and performs complementary-filter attitude estimation and artificial
+horizon rendering entirely on the client. If no provider is configured, the
+endpoint returns HTTP 503.

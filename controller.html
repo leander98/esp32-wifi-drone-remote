@@ -144,6 +144,29 @@
       display: grid;
       place-items: center;
       color: #7b8491;
+      position: relative;
+      overflow: hidden;
+    }
+    .telemetry canvas { width: 100%; height: 100%; display: block; }
+    .telemetry.disabled canvas { display: none; }
+    .telemetry.disabled .telemetry-values {
+      inset: 0;
+      display: grid;
+      place-items: center;
+      background: transparent;
+      color: var(--muted);
+      font: 600 12px system-ui;
+    }
+    .telemetry-values {
+      position: absolute;
+      left: 7px;
+      bottom: 5px;
+      padding: 3px 5px;
+      border-radius: 5px;
+      background: #0008;
+      color: white;
+      font: 10px/1.3 ui-monospace, monospace;
+      pointer-events: none;
     }
     .rotate-message {
       display: none;
@@ -207,7 +230,14 @@
         <button class="secondary" data-api="headlight">Headlight</button>
         <button class="secondary" data-api="sound">Sound</button>
       </div>
-      <div class="telemetry">Telemetry placeholder</div>
+      <button id="attitude-toggle" class="secondary"
+              aria-pressed="false">Enable attitude</button>
+      <div class="telemetry disabled" id="telemetry">
+        <canvas id="attitude" aria-label="IMU attitude indicator"></canvas>
+        <div class="telemetry-values" id="telemetry-values">
+          Attitude indicator disabled
+        </div>
+      </div>
     </section>
     <section class="stick-card">
       <h2>Direction</h2>
@@ -228,7 +258,18 @@
     const signalEl = document.querySelector("#signal");
     const pingEl = document.querySelector("#ping");
     const networkModeEl = document.querySelector("#network-mode");
+    const attitudeCanvas = document.querySelector("#attitude");
+    const telemetryElement = document.querySelector("#telemetry");
+    const telemetryValues = document.querySelector("#telemetry-values");
+    const attitudeToggle = document.querySelector("#attitude-toggle");
+    const attitudeContext = attitudeCanvas.getContext("2d");
     let statusTimer;
+    let telemetryTimer;
+    let telemetryEnabled = false;
+    let roll = 0;
+    let pitch = 0;
+    let yaw = 0;
+    let previousTelemetryAt;
 
     try {
       document.body.classList.toggle(
@@ -332,6 +373,193 @@
       }
     }
 
+    function drawAttitude() {
+      const bounds = attitudeCanvas.getBoundingClientRect();
+      const scale = window.devicePixelRatio || 1;
+      const width = Math.max(1, Math.round(bounds.width * scale));
+      const height = Math.max(1, Math.round(bounds.height * scale));
+      if (attitudeCanvas.width !== width || attitudeCanvas.height !== height) {
+        attitudeCanvas.width = width;
+        attitudeCanvas.height = height;
+      }
+      const context = attitudeContext;
+      context.setTransform(scale, 0, 0, scale, 0, 0);
+      context.clearRect(0, 0, bounds.width, bounds.height);
+
+      const centerX = bounds.width / 2;
+      const centerY = bounds.height / 2;
+      const pixelsPerDegree = bounds.height / 55;
+      const pitchOffset = pitch * pixelsPerDegree;
+      const sceneSize = Math.max(bounds.width, bounds.height) * 3;
+
+      /* Moving attitude sphere: sky, ground, horizon, and pitch ladder. */
+      context.save();
+      context.beginPath();
+      context.rect(0, 0, bounds.width, bounds.height);
+      context.clip();
+      context.translate(centerX, centerY);
+      context.rotate(-roll * Math.PI / 180);
+
+      const sky = context.createLinearGradient(0, -sceneSize, 0, pitchOffset);
+      sky.addColorStop(0, "#0b4f9c");
+      sky.addColorStop(1, "#4db4ed");
+      context.fillStyle = sky;
+      context.fillRect(-sceneSize, -sceneSize + pitchOffset,
+                       sceneSize * 2, sceneSize);
+
+      const ground = context.createLinearGradient(
+        0, pitchOffset, 0, sceneSize
+      );
+      ground.addColorStop(0, "#a86c35");
+      ground.addColorStop(1, "#3f281d");
+      context.fillStyle = ground;
+      context.fillRect(-sceneSize, pitchOffset, sceneSize * 2, sceneSize);
+
+      context.strokeStyle = "white";
+      context.lineWidth = 2.5;
+      context.beginPath();
+      context.moveTo(-sceneSize, pitchOffset);
+      context.lineTo(sceneSize, pitchOffset);
+      context.stroke();
+
+      context.font = "bold 9px system-ui";
+      context.fillStyle = "white";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      for (let angle = -40; angle <= 40; angle += 5) {
+        if (angle === 0) continue;
+        const y = pitchOffset - angle * pixelsPerDegree;
+        const major = angle % 10 === 0;
+        const halfWidth = major ? 31 : 18;
+        context.lineWidth = major ? 1.8 : 1;
+        context.beginPath();
+        context.moveTo(-halfWidth, y);
+        context.lineTo(halfWidth, y);
+        context.stroke();
+        if (major) {
+          context.fillText(Math.abs(angle), -halfWidth - 11, y);
+          context.fillText(Math.abs(angle), halfWidth + 11, y);
+        }
+      }
+      context.restore();
+
+      /* Fixed bank scale with a moving roll pointer. */
+      const bankRadius = Math.min(bounds.width, bounds.height) * .42;
+      context.strokeStyle = "white";
+      context.fillStyle = "white";
+      context.lineWidth = 1.5;
+      for (const bank of [-60, -45, -30, -20, -10, 0, 10, 20, 30, 45, 60]) {
+        const angle = (-90 + bank) * Math.PI / 180;
+        const longTick = bank % 30 === 0;
+        const outerX = centerX + Math.cos(angle) * bankRadius;
+        const outerY = centerY + Math.sin(angle) * bankRadius;
+        const innerRadius = bankRadius - (longTick ? 9 : 5);
+        context.beginPath();
+        context.moveTo(outerX, outerY);
+        context.lineTo(centerX + Math.cos(angle) * innerRadius,
+                       centerY + Math.sin(angle) * innerRadius);
+        context.stroke();
+      }
+      const pointerAngle = (-90 - roll) * Math.PI / 180;
+      const pointerX = centerX + Math.cos(pointerAngle) * (bankRadius - 12);
+      const pointerY = centerY + Math.sin(pointerAngle) * (bankRadius - 12);
+      context.save();
+      context.translate(pointerX, pointerY);
+      context.rotate(pointerAngle + Math.PI / 2);
+      context.fillStyle = "#ffdf45";
+      context.beginPath();
+      context.moveTo(0, -7);
+      context.lineTo(-5, 3);
+      context.lineTo(5, 3);
+      context.closePath();
+      context.fill();
+      context.restore();
+
+      /* Fixed aircraft reference wings and nose marker. */
+      context.strokeStyle = "#ffdf45";
+      context.lineWidth = 3.5;
+      context.lineJoin = "round";
+      context.beginPath();
+      context.moveTo(centerX - 38, centerY);
+      context.lineTo(centerX - 12, centerY);
+      context.lineTo(centerX - 6, centerY + 7);
+      context.moveTo(centerX + 6, centerY + 7);
+      context.lineTo(centerX + 12, centerY);
+      context.lineTo(centerX + 38, centerY);
+      context.stroke();
+      context.fillStyle = "#ffdf45";
+      context.beginPath();
+      context.arc(centerX, centerY + 7, 3.5, 0, Math.PI * 2);
+      context.fill();
+
+      /* Heading derived from integrated yaw. */
+      context.fillStyle = "white";
+      context.font = "bold 12px system-ui";
+      context.textAlign = "center";
+      context.fillText(`${Math.round((yaw + 360) % 360)}°`,
+                       bounds.width / 2, 16);
+    }
+
+    async function updateTelemetry() {
+      try {
+        const response = await fetch("/api/telemetry", { cache: "no-store" });
+        if (!response.ok) throw new Error();
+        const sample = await response.json();
+        const now = performance.now();
+        const dt = previousTelemetryAt
+          ? Math.min((now - previousTelemetryAt) / 1000, .25) : 0;
+        previousTelemetryAt = now;
+        const acceleration = sample.accelerometer;
+        const gyroscope = sample.gyroscope;
+        const accelerationRoll = Math.atan2(
+          acceleration.y, acceleration.z
+        ) * 180 / Math.PI;
+        const accelerationPitch = Math.atan2(
+          -acceleration.x,
+          Math.hypot(acceleration.y, acceleration.z)
+        ) * 180 / Math.PI;
+        roll = .98 * (roll + gyroscope.x * dt) + .02 * accelerationRoll;
+        pitch = .98 * (pitch + gyroscope.y * dt) + .02 * accelerationPitch;
+        yaw = (yaw + gyroscope.z * dt + 360) % 360;
+        telemetryValues.textContent =
+          `A ${acceleration.x.toFixed(2)} ${acceleration.y.toFixed(2)} `
+          + `${acceleration.z.toFixed(2)} g\n`
+          + `G ${gyroscope.x.toFixed(1)} ${gyroscope.y.toFixed(1)} `
+          + `${gyroscope.z.toFixed(1)} °/s`;
+        telemetryValues.style.whiteSpace = "pre";
+        drawAttitude();
+      } catch (error) {
+        telemetryValues.textContent = "IMU unavailable";
+      }
+    }
+
+    function setTelemetryEnabled(enabled) {
+      telemetryEnabled = enabled;
+      clearInterval(telemetryTimer);
+      telemetryTimer = undefined;
+      telemetryElement.classList.toggle("disabled", !enabled);
+      attitudeToggle.setAttribute("aria-pressed", String(enabled));
+      attitudeToggle.textContent =
+        enabled ? "Disable attitude" : "Enable attitude";
+
+      if (enabled) {
+        roll = 0;
+        pitch = 0;
+        yaw = 0;
+        previousTelemetryAt = undefined;
+        updateTelemetry();
+        telemetryTimer = setInterval(updateTelemetry, 100);
+      } else {
+        telemetryValues.textContent = "Attitude indicator disabled";
+        attitudeContext.clearRect(
+          0, 0, attitudeCanvas.width, attitudeCanvas.height
+        );
+      }
+    }
+    attitudeToggle.addEventListener("click", () => {
+      setTelemetryEnabled(!telemetryEnabled);
+    });
+
     function fullscreenChanged() {
       const fullscreen = document.fullscreenElement
         || document.webkitFullscreenElement;
@@ -346,6 +574,7 @@
     }
     document.addEventListener("fullscreenchange", fullscreenChanged);
     document.addEventListener("webkitfullscreenchange", fullscreenChanged);
+    setTelemetryEnabled(false);
 
     document.querySelectorAll("[data-stick]").forEach((stick) => {
       let active = false;

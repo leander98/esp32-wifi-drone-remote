@@ -40,6 +40,8 @@ static void *s_api_context;
 static esp32_wifi_drone_remote_latency_handler_t s_latency_handler;
 static void *s_latency_context;
 static uint32_t s_latency_timeout_ms = 150U;
+static esp32_wifi_drone_remote_telemetry_handler_t s_telemetry_handler;
+static void *s_telemetry_context;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
 static char s_saved_ap_ssid[33];
@@ -242,6 +244,37 @@ static esp_err_t latency_handler(httpd_req_t *request)
     }
     httpd_resp_set_status(request, "204 No Content");
     return httpd_resp_send(request, NULL, 0);
+}
+
+/**
+ * @brief Return application-provided IMU vectors as JSON.
+ */
+static esp_err_t telemetry_handler(httpd_req_t *request)
+{
+    if (s_telemetry_handler == NULL) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request,
+                                  "Telemetry provider is not configured");
+    }
+
+    esp32_wifi_drone_remote_telemetry_t telemetry = { 0 };
+    esp_err_t err = s_telemetry_handler(&telemetry, s_telemetry_context);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, esp_err_to_name(err));
+    }
+
+    char response[224];
+    int length = snprintf(
+        response, sizeof(response),
+        "{\"accelerometer\":{\"x\":%.5f,\"y\":%.5f,\"z\":%.5f},"
+        "\"gyroscope\":{\"x\":%.5f,\"y\":%.5f,\"z\":%.5f}}",
+        telemetry.acceleration_x, telemetry.acceleration_y,
+        telemetry.acceleration_z, telemetry.gyroscope_x,
+        telemetry.gyroscope_y, telemetry.gyroscope_z);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
 }
 
 /**
@@ -707,6 +740,15 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &latency);
     }
 
+    const httpd_uri_t telemetry = {
+        .uri = "/api/telemetry",
+        .method = HTTP_GET,
+        .handler = telemetry_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &telemetry);
+    }
+
     const httpd_uri_t ap_config_get = {
         .uri = "/api/ap-config",
         .method = HTTP_GET,
@@ -897,6 +939,8 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_latency_handler = effective_config.latency_handler;
     s_latency_context = effective_config.latency_context;
     s_latency_timeout_ms = effective_config.latency_timeout_ms;
+    s_telemetry_handler = effective_config.telemetry_handler;
+    s_telemetry_context = effective_config.telemetry_context;
 
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
@@ -982,6 +1026,8 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_latency_handler = NULL;
     s_latency_context = NULL;
     s_latency_timeout_ms = 150U;
+    s_telemetry_handler = NULL;
+    s_telemetry_context = NULL;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
 }
