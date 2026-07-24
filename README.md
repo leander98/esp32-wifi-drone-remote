@@ -48,6 +48,12 @@ to invoke the configurable `/api/brightness` control endpoint. Fullscreen
 mode displays Wi-Fi signal bars and HTTP round-trip latency to the ESP32. In
 station mode RSSI is measured by the ESP32 against its upstream access point;
 in access-point mode RSSI is selected for the phone requesting the status.
+Signal bars turn red when latency exceeds the configured threshold, which
+defaults to 150 ms.
+
+The Settings page contains a Wi-Fi access-point submenu available in both
+connection modes. AP SSID, password/open-network mode, maximum client count,
+and transmit power are stored in NVS and applied after the automatic restart.
 
 ```c
 #include "esp32-wifi-drone-remote.h"
@@ -67,7 +73,6 @@ The page sends JSON `POST` requests to these endpoints:
 
 | Endpoint | Control |
 | --- | --- |
-| `/api/settings` | Settings button |
 | `/api/turn-lock` | Turn-lock button |
 | `/api/brightness` | Brightness button |
 | `/api/headlight` | Headlight button |
@@ -111,3 +116,8 @@ The callback runs in the HTTP server task and should return quickly. Request
 data is valid only until the callback returns. Returning an error produces an
 HTTP 500 response; returning `ESP_OK` produces HTTP 204. Controller request
 bodies are limited to 256 bytes.
+
+Set `latency_handler`, `latency_context`, and `latency_timeout_ms` in the same
+configuration structure to receive browser round-trip samples. The callback
+receives the latency and a boolean indicating whether the threshold was
+exceeded, allowing flight-control timeout behavior to be added externally.

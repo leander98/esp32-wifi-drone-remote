@@ -76,6 +76,7 @@
     .signal[data-bars="2"] i:nth-child(-n+2),
     .signal[data-bars="3"] i:nth-child(-n+3),
     .signal[data-bars="4"] i:nth-child(-n+4) { background: #54d17a; }
+    .signal.latency-warning i { background: #ef3f4c !important; }
     button {
       border: 0;
       border-radius: 12px;
@@ -182,7 +183,7 @@
     <div class="toolbar">
       <button id="fullscreen" class="secondary">Fullscreen</button>
       <button id="connect">Connect</button>
-      <button class="secondary" data-api="settings">Settings</button>
+      <button id="settings" class="secondary">Settings</button>
     </div>
   </header>
   <main class="controls">
@@ -262,6 +263,9 @@
     document.querySelector("#connect").onclick = () => {
       window.location.href = "/wifi";
     };
+    document.querySelector("#settings").onclick = () => {
+      window.location.href = "/settings";
+    };
 
     async function lockLandscape() {
       if (!screen.orientation?.lock) return false;
@@ -311,8 +315,18 @@
         );
         networkModeEl.textContent = info.mode.toUpperCase();
         pingEl.textContent = `${ping} ms`;
+        signalEl.classList.toggle(
+          "latency-warning", ping > info.timeout_ms
+        );
+        fetch("/api/latency", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ latency_ms: ping }),
+          keepalive: true,
+        }).catch(() => {});
       } catch (error) {
         signalEl.dataset.bars = 0;
+        signalEl.classList.add("latency-warning");
         networkModeEl.textContent = "--";
         pingEl.textContent = "-- ms";
       }

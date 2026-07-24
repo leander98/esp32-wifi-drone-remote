@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <esp_check.h>
@@ -36,13 +37,23 @@ static bool s_mdns_started;
 static wifi_mode_t s_wifi_mode = WIFI_MODE_NULL;
 static esp32_wifi_drone_remote_api_handler_t s_api_handler;
 static void *s_api_context;
+static esp32_wifi_drone_remote_latency_handler_t s_latency_handler;
+static void *s_latency_context;
+static uint32_t s_latency_timeout_ms = 150U;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
+static char s_saved_ap_ssid[33];
+static char s_saved_ap_password[65];
+static esp32_wifi_drone_remote_config_t s_effective_config;
 
 extern const uint8_t controller_html_start[]
     asm("_binary_controller_html_start");
 extern const uint8_t wifi_setup_html_start[]
     asm("_binary_wifi_setup_html_start");
+extern const uint8_t settings_html_start[]
+    asm("_binary_settings_html_start");
+extern const uint8_t wifi_ap_settings_html_start[]
+    asm("_binary_wifi_ap_settings_html_start");
 
 /**
  * @brief Advertise the controller through multicast DNS.
@@ -103,6 +114,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
 static esp_err_t page_handler(httpd_req_t *request)
 {
     httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)controller_html_start,
                            HTTPD_RESP_USE_STRLEN);
 }
@@ -116,7 +129,29 @@ static esp_err_t page_handler(httpd_req_t *request)
 static esp_err_t wifi_setup_page_handler(httpd_req_t *request)
 {
     httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)wifi_setup_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the embedded settings menu. */
+static esp_err_t settings_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)settings_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the embedded Wi-Fi access-point settings page. */
+static esp_err_t ap_settings_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)wifi_ap_settings_html_start,
                            HTTPD_RESP_USE_STRLEN);
 }
 
@@ -167,12 +202,46 @@ static esp_err_t status_handler(httpd_req_t *request)
         }
     }
 
-    char response[48];
+    char response[80];
     int length = snprintf(response, sizeof(response),
-                          "{\"mode\":\"%s\",\"rssi\":%d}", mode, rssi);
+                          "{\"mode\":\"%s\",\"rssi\":%d,\"timeout_ms\":%lu}",
+                          mode, rssi,
+                          (unsigned long)s_latency_timeout_ms);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, response, length);
+}
+
+/**
+ * @brief Receive a browser latency sample and notify the application.
+ */
+static esp_err_t latency_handler(httpd_req_t *request)
+{
+    char body[48];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid latency sample");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    unsigned long latency_ms;
+    if (sscanf(body, "{\"latency_ms\":%lu}", &latency_ms) != 1 ||
+        latency_ms > UINT32_MAX) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid latency sample");
+    }
+    if (s_latency_handler != NULL) {
+        s_latency_handler((uint32_t)latency_ms,
+                          latency_ms > s_latency_timeout_ms,
+                          s_latency_context);
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
 }
 
 /**
@@ -320,7 +389,139 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
 }
 
 /**
- * @brief Override compile-time station credentials with values stored in NVS.
+ * @brief Return the effective access-point settings without exposing its key.
+ */
+static esp_err_t ap_config_get_handler(httpd_req_t *request)
+{
+    char escaped_ssid[67];
+    size_t output = 0U;
+    for (const char *input = s_effective_config.ap_ssid;
+         *input != '\0' && output + 2U < sizeof(escaped_ssid); ++input) {
+        if (*input == '"' || *input == '\\') {
+            escaped_ssid[output++] = '\\';
+        }
+        escaped_ssid[output++] = *input;
+    }
+    escaped_ssid[output] = '\0';
+
+    char response[180];
+    int length = snprintf(
+        response, sizeof(response),
+        "{\"ssid\":\"%s\",\"password_set\":%s,"
+        "\"max_connections\":%u,\"tx_power\":%d}",
+        escaped_ssid,
+        s_effective_config.ap_password[0] != '\0' ? "true" : "false",
+        s_effective_config.ap_max_connections,
+        s_effective_config.ap_tx_power_quarter_dbm);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
+}
+
+/**
+ * @brief Persist access-point settings submitted by the settings page.
+ */
+static esp_err_t ap_config_post_handler(httpd_req_t *request)
+{
+    char body[512];
+    char ssid[sizeof(s_saved_ap_ssid) * 3U];
+    char password[sizeof(s_saved_ap_password) * 3U] = "";
+    char clients_text[4];
+    char power_text[4];
+    char open_text[2];
+
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid form size");
+    }
+    size_t received_total = 0U;
+    while (received_total < request->content_len) {
+        int received = httpd_req_recv(
+            request, body + received_total,
+            request->content_len - received_total);
+        if (received <= 0) {
+            return ESP_FAIL;
+        }
+        received_total += (size_t)received;
+    }
+    body[received_total] = '\0';
+
+    bool open_network =
+        httpd_query_key_value(body, "open", open_text, sizeof(open_text)) ==
+        ESP_OK;
+    bool password_supplied =
+        httpd_query_key_value(body, "password", password,
+                              sizeof(password)) == ESP_OK;
+    if (httpd_query_key_value(body, "ssid", ssid, sizeof(ssid)) != ESP_OK ||
+        httpd_query_key_value(body, "clients", clients_text,
+                              sizeof(clients_text)) != ESP_OK ||
+        httpd_query_key_value(body, "tx_power", power_text,
+                              sizeof(power_text)) != ESP_OK ||
+        url_decode(ssid) != ESP_OK ||
+        (password_supplied && url_decode(password) != ESP_OK)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid access-point settings");
+    }
+
+    int clients = atoi(clients_text);
+    int tx_power = atoi(power_text);
+    size_t ssid_length = strlen(ssid);
+    size_t password_length = strlen(password);
+    if (ssid_length == 0U || ssid_length >= sizeof(s_saved_ap_ssid) ||
+        clients < 1 || clients > 10 ||
+        (tx_power != 20 && tx_power != 40 &&
+         tx_power != 60 && tx_power != 78) ||
+        (!open_network && password_supplied && password_length > 0U &&
+         password_length < 8U) ||
+        password_length >= sizeof(s_saved_ap_password)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid access-point settings");
+    }
+
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open("drone_remote", NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "ap_ssid", ssid);
+    }
+    if (err == ESP_OK && open_network) {
+        err = nvs_set_str(nvs, "ap_password", "");
+    } else if (err == ESP_OK && password_supplied && password_length > 0U) {
+        err = nvs_set_str(nvs, "ap_password", password);
+    } else if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "ap_password",
+                          s_effective_config.ap_password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(nvs, "ap_clients", (uint8_t)clients);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_i8(nvs, "ap_tx_power", (int8_t)tx_power);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    if (nvs != 0) {
+        nvs_close(nvs);
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   "Could not save access-point settings");
+    }
+
+    httpd_resp_set_type(request, "application/json");
+    err = httpd_resp_sendstr(request, "{\"saved\":true}");
+    if (err == ESP_OK &&
+        xTaskCreate(delayed_restart_task, "ap-restart", 2048, NULL, 5,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "Could not create restart task");
+    }
+    return err;
+}
+
+/**
+ * @brief Override compile-time network settings with values stored in NVS.
  *
  * Missing or invalid saved values are ignored, leaving the supplied runtime
  * configuration unchanged.
@@ -328,7 +529,7 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
  * @param config Runtime configuration supplied by the application.
  * @param effective Destination configuration used for Wi-Fi startup.
  */
-static void apply_saved_station_config(
+static void apply_saved_network_config(
     const esp32_wifi_drone_remote_config_t *config,
     esp32_wifi_drone_remote_config_t *effective)
 {
@@ -351,8 +552,6 @@ static void apply_saved_station_config(
             err = ESP_OK;
         }
     }
-    nvs_close(nvs);
-
     if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
         effective->station_ssid = s_saved_station_ssid;
         effective->station_password = s_saved_station_password;
@@ -361,6 +560,25 @@ static void apply_saved_station_config(
         ESP_LOGW(TAG, "Ignoring invalid saved station credentials: %s",
                  esp_err_to_name(err));
     }
+
+    size_t ap_ssid_size = sizeof(s_saved_ap_ssid);
+    size_t ap_password_size = sizeof(s_saved_ap_password);
+    if (nvs_get_str(nvs, "ap_ssid", s_saved_ap_ssid,
+                    &ap_ssid_size) == ESP_OK &&
+        nvs_get_str(nvs, "ap_password", s_saved_ap_password,
+                    &ap_password_size) == ESP_OK) {
+        effective->ap_ssid = s_saved_ap_ssid;
+        effective->ap_password = s_saved_ap_password;
+    }
+    uint8_t clients;
+    int8_t tx_power;
+    if (nvs_get_u8(nvs, "ap_clients", &clients) == ESP_OK) {
+        effective->ap_max_connections = clients;
+    }
+    if (nvs_get_i8(nvs, "ap_tx_power", &tx_power) == ESP_OK) {
+        effective->ap_tx_power_quarter_dbm = tx_power;
+    }
+    nvs_close(nvs);
 }
 
 /**
@@ -418,11 +636,12 @@ static esp_err_t api_handler(httpd_req_t *request)
 static esp_err_t start_webserver(void)
 {
     static const char *api_paths[] = {
-        "/api/settings", "/api/turn-lock", "/api/brightness", "/api/headlight",
+        "/api/settings", /* Compatibility with cached controller pages. */
+        "/api/turn-lock", "/api/brightness", "/api/headlight",
         "/api/sound", "/api/left-stick", "/api/right-stick",
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 20;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -443,6 +662,24 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &wifi_page);
     }
 
+    const httpd_uri_t settings_page = {
+        .uri = "/settings",
+        .method = HTTP_GET,
+        .handler = settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &settings_page);
+    }
+
+    const httpd_uri_t ap_settings_page = {
+        .uri = "/settings/wifi-ap",
+        .method = HTTP_GET,
+        .handler = ap_settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &ap_settings_page);
+    }
+
     const httpd_uri_t wifi_config = {
         .uri = "/api/wifi-config",
         .method = HTTP_POST,
@@ -459,6 +696,33 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &status);
+    }
+
+    const httpd_uri_t latency = {
+        .uri = "/api/latency",
+        .method = HTTP_POST,
+        .handler = latency_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &latency);
+    }
+
+    const httpd_uri_t ap_config_get = {
+        .uri = "/api/ap-config",
+        .method = HTTP_GET,
+        .handler = ap_config_get_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &ap_config_get);
+    }
+
+    const httpd_uri_t ap_config_post = {
+        .uri = "/api/ap-config",
+        .method = HTTP_POST,
+        .handler = ap_config_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &ap_config_post);
     }
 
     for (size_t i = 0; err == ESP_OK &&
@@ -596,6 +860,9 @@ static esp_err_t start_access_point(
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &wifi_config), TAG,
                         "Could not configure access point");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Could not start access point");
+    ESP_RETURN_ON_ERROR(
+        esp_wifi_set_max_tx_power(config->ap_tx_power_quarter_dbm), TAG,
+        "Could not set access-point transmit power");
     s_wifi_mode = WIFI_MODE_AP;
     ESP_LOGI(TAG, "Access point \"%s\" ready", config->ap_ssid);
     return ESP_OK;
@@ -609,8 +876,11 @@ esp_err_t esp32_wifi_drone_remote_start(
     }
     if (config == NULL || config->ap_ssid == NULL ||
         config->ap_password == NULL || config->ap_max_connections == 0U ||
+        config->ap_tx_power_quarter_dbm < 8 ||
+        config->ap_tx_power_quarter_dbm > 78 ||
         config->station_ssid == NULL || config->station_password == NULL ||
-        config->station_timeout_ms == 0U) {
+        config->station_timeout_ms == 0U ||
+        config->latency_timeout_ms == 0U) {
         return ESP_ERR_INVALID_ARG;
     }
 
@@ -620,9 +890,13 @@ esp_err_t esp32_wifi_drone_remote_start(
     }
 
     esp32_wifi_drone_remote_config_t effective_config;
-    apply_saved_station_config(config, &effective_config);
+    apply_saved_network_config(config, &effective_config);
+    s_effective_config = effective_config;
     s_api_handler = effective_config.api_handler;
     s_api_context = effective_config.api_context;
+    s_latency_handler = effective_config.latency_handler;
+    s_latency_context = effective_config.latency_context;
+    s_latency_timeout_ms = effective_config.latency_timeout_ms;
 
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
@@ -705,6 +979,9 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_started = false;
     s_api_handler = NULL;
     s_api_context = NULL;
+    s_latency_handler = NULL;
+    s_latency_context = NULL;
+    s_latency_timeout_ms = 150U;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
 }

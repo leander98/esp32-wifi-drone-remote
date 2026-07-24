@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include <esp_err.h>
 #include <sdkconfig.h>
@@ -31,6 +32,18 @@ typedef esp_err_t (*esp32_wifi_drone_remote_api_handler_t)(
     void *context);
 
 /**
+ * @brief Receive browser-to-ESP32 latency measurements.
+ *
+ * @param latency_ms Measured HTTP round-trip latency in milliseconds.
+ * @param timeout_exceeded True when latency exceeds the configured threshold.
+ * @param context Application context from the component configuration.
+ */
+typedef void (*esp32_wifi_drone_remote_latency_handler_t)(
+    uint32_t latency_ms,
+    bool timeout_exceeded,
+    void *context);
+
+/**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
 typedef struct {
@@ -40,6 +53,8 @@ typedef struct {
     const char *ap_password;
     /** Maximum number of stations accepted by the access point. */
     uint8_t ap_max_connections;
+    /** Maximum access-point transmit power in quarter-dBm units. */
+    int8_t ap_tx_power_quarter_dbm;
     /** Existing network to join; an empty string selects access-point mode. */
     const char *station_ssid;
     /** Password for the existing network. */
@@ -50,6 +65,12 @@ typedef struct {
     esp32_wifi_drone_remote_api_handler_t api_handler;
     /** Application value passed to api_handler on every request. */
     void *api_context;
+    /** Optional callback receiving browser round-trip latency measurements. */
+    esp32_wifi_drone_remote_latency_handler_t latency_handler;
+    /** Application value passed to latency_handler. */
+    void *latency_context;
+    /** Latency above this value is reported as a timeout. */
+    uint32_t latency_timeout_ms;
 } esp32_wifi_drone_remote_config_t;
 
 /**
@@ -60,11 +81,15 @@ typedef struct {
         .ap_ssid = CONFIG_ESP32_WIFI_DRONE_REMOTE_AP_SSID,             \
         .ap_password = CONFIG_ESP32_WIFI_DRONE_REMOTE_AP_PASSWORD,     \
         .ap_max_connections = CONFIG_ESP32_WIFI_DRONE_REMOTE_MAX_CONNECTIONS, \
+        .ap_tx_power_quarter_dbm = CONFIG_ESP32_WIFI_DRONE_REMOTE_AP_TX_POWER, \
         .station_ssid = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_SSID,       \
         .station_password = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_PASSWORD, \
         .station_timeout_ms = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_TIMEOUT_MS, \
         .api_handler = NULL,                                            \
         .api_context = NULL,                                            \
+        .latency_handler = NULL,                                        \
+        .latency_context = NULL,                                        \
+        .latency_timeout_ms = 150,                                      \
     }
 
 /**

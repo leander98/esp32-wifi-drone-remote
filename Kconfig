@@ -20,6 +20,14 @@ menu "Wi-Fi drone remote configuration"
         help
             Maximum number of stations allowed to connect to the access point.
 
+    config ESP32_WIFI_DRONE_REMOTE_AP_TX_POWER
+        int "Access point transmit power (quarter-dBm)"
+        range 8 78
+        default 78
+        help
+            Maximum Wi-Fi transmit power in quarter-dBm units. For example,
+            78 selects 19.5 dBm.
+
     config ESP32_WIFI_DRONE_REMOTE_STA_SSID
         string "Existing Wi-Fi network SSID"
         default ""
