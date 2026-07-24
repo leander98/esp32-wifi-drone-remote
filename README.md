@@ -29,7 +29,9 @@ credentials, and connection timeout can be configured under
 
 Leave the existing-network SSID empty to always use access-point mode. In
 access-point mode, connect to the configured SSID and open
-`http://192.168.4.1`.
+`http://esp32drone.local`. The component advertises this hostname through
+mDNS in both access-point and station modes. `http://192.168.4.1` remains
+available as an access-point fallback.
 
 The controller's **Connect** button opens `/wifi`, where station credentials
 can be saved from a phone. Submitted credentials are stored in NVS and take
@@ -69,5 +71,37 @@ The page sends JSON `POST` requests to these endpoints:
 | `/api/wifi-config` | Saves station credentials and schedules a restart |
 
 Stick request bodies have the form `{"x": 0.0, "y": 0.0}`, with both values
-normalized to the range -1 through 1. All endpoint handlers currently consume
-the request, log its URI, and return HTTP 204 without controlling hardware.
+normalized to the range -1 through 1.
+
+By default, controller requests are consumed, logged, and acknowledged with
+HTTP 204 without controlling hardware. Set `api_handler` to receive them in
+the application:
+
+```c
+static esp_err_t handle_remote_request(
+    const char *uri,
+    const uint8_t *body,
+    size_t body_length,
+    void *context)
+{
+    /* Dispatch by URI and parse the body as needed. */
+    ESP_LOGI("remote", "%s received %u bytes",
+             uri, (unsigned)body_length);
+    return ESP_OK;
+}
+
+void app_main(void)
+{
+    esp32_wifi_drone_remote_config_t config =
+        ESP32_WIFI_DRONE_REMOTE_DEFAULT_CONFIG();
+    config.api_handler = handle_remote_request;
+    config.api_context = NULL;
+
+    ESP_ERROR_CHECK(esp32_wifi_drone_remote_start(&config));
+}
+```
+
+The callback runs in the HTTP server task and should return quickly. Request
+data is valid only until the callback returns. Returning an error produces an
+HTTP 500 response; returning `ESP_OK` produces HTTP 204. Controller request
+bodies are limited to 256 bytes.

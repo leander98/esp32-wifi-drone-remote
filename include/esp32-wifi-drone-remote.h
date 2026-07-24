@@ -2,6 +2,7 @@
 #define ESP32_WIFI_DRONE_REMOTE_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 #include <esp_err.h>
 #include <sdkconfig.h>
@@ -9,6 +10,25 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * @brief Handle a request from one of the drone controller API endpoints.
+ *
+ * The callback runs in the ESP-IDF HTTP server task. The URI and body pointers
+ * are only valid for the duration of the callback.
+ *
+ * @param uri Requested endpoint, for example `/api/left-stick`.
+ * @param body Raw request body; not guaranteed to be null-terminated.
+ * @param body_length Number of valid bytes in @p body.
+ * @param context Application context configured in
+ *                esp32_wifi_drone_remote_config_t.
+ * @return ESP_OK when the request was accepted, otherwise an ESP-IDF error.
+ */
+typedef esp_err_t (*esp32_wifi_drone_remote_api_handler_t)(
+    const char *uri,
+    const uint8_t *body,
+    size_t body_length,
+    void *context);
 
 /**
  * @brief Runtime configuration for the Wi-Fi drone remote.
@@ -26,6 +46,10 @@ typedef struct {
     const char *station_password;
     /** Time to wait for a station IP address before access-point fallback. */
     uint32_t station_timeout_ms;
+    /** Optional controller endpoint callback; NULL uses the placeholder. */
+    esp32_wifi_drone_remote_api_handler_t api_handler;
+    /** Application value passed to api_handler on every request. */
+    void *api_context;
 } esp32_wifi_drone_remote_config_t;
 
 /**
@@ -39,6 +63,8 @@ typedef struct {
         .station_ssid = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_SSID,       \
         .station_password = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_PASSWORD, \
         .station_timeout_ms = CONFIG_ESP32_WIFI_DRONE_REMOTE_STA_TIMEOUT_MS, \
+        .api_handler = NULL,                                            \
+        .api_context = NULL,                                            \
     }
 
 /**

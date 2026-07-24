@@ -13,6 +13,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
 #include <freertos/task.h>
+#include <mdns.h>
 #include <nvs.h>
 #include <nvs_flash.h>
 
@@ -21,6 +22,7 @@
 static const char *TAG = "wifi-drone-remote";
 static const EventBits_t WIFI_CONNECTED_BIT = BIT0;
 static const EventBits_t WIFI_FAILED_BIT = BIT1;
+static const char *NETWORK_HOSTNAME = "esp32drone";
 
 static EventGroupHandle_t s_wifi_events;
 static esp_event_handler_instance_t s_wifi_handler;
@@ -28,6 +30,9 @@ static esp_event_handler_instance_t s_ip_handler;
 static esp_netif_t *s_netif;
 static httpd_handle_t s_server;
 static bool s_started;
+static bool s_mdns_started;
+static esp32_wifi_drone_remote_api_handler_t s_api_handler;
+static void *s_api_context;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
 
@@ -35,6 +40,28 @@ extern const uint8_t controller_html_start[]
     asm("_binary_controller_html_start");
 extern const uint8_t wifi_setup_html_start[]
     asm("_binary_wifi_setup_html_start");
+
+/**
+ * @brief Advertise the controller through multicast DNS.
+ *
+ * @return ESP_OK on success, otherwise an mDNS initialization error.
+ */
+static esp_err_t start_mdns(void)
+{
+    ESP_RETURN_ON_ERROR(mdns_init(), TAG, "Could not initialize mDNS");
+    s_mdns_started = true;
+    ESP_RETURN_ON_ERROR(mdns_hostname_set(NETWORK_HOSTNAME), TAG,
+                        "Could not set mDNS hostname");
+    ESP_RETURN_ON_ERROR(
+        mdns_instance_name_set("ESP32 Drone Remote"), TAG,
+        "Could not set mDNS instance name");
+    ESP_RETURN_ON_ERROR(
+        mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0), TAG,
+        "Could not advertise HTTP service");
+    ESP_LOGI(TAG, "Controller available at http://%s.local",
+             NETWORK_HOSTNAME);
+    return ESP_OK;
+}
 
 /**
  * @brief Process Wi-Fi station lifecycle events.
@@ -279,29 +306,48 @@ static void apply_saved_station_config(
 }
 
 /**
- * @brief Consume a controller request without performing an action.
+ * @brief Dispatch a controller request to the configured application callback.
  *
- * Every controller endpoint currently uses this placeholder. Request bodies
- * are drained so the persistent HTTP connection remains usable.
+ * When no callback is configured, the request is logged and acknowledged by
+ * the original placeholder behavior.
  *
  * @param request HTTP POST request for a controller endpoint.
- * @return ESP_OK after sending HTTP 204, or ESP_FAIL on a receive error.
+ * @return ESP_OK after responding, or an HTTP-server receive/send error.
  */
 static esp_err_t api_handler(httpd_req_t *request)
 {
-    char buffer[128];
-    size_t remaining = request->content_len;
+    uint8_t body[256];
+    size_t received_total = 0U;
 
-    while (remaining > 0U) {
-        size_t chunk = remaining < sizeof(buffer) ? remaining : sizeof(buffer);
-        int received = httpd_req_recv(request, buffer, chunk);
+    if (request->content_len > sizeof(body)) {
+        httpd_resp_set_status(request, "413 Content Too Large");
+        return httpd_resp_sendstr(request, "Controller request is too large");
+    }
+
+    while (received_total < request->content_len) {
+        int received = httpd_req_recv(
+            request, (char *)body + received_total,
+            request->content_len - received_total);
         if (received <= 0) {
             return ESP_FAIL;
         }
-        remaining -= (size_t)received;
+        received_total += (size_t)received;
     }
 
-    ESP_LOGI(TAG, "Placeholder request: %s", request->uri);
+    if (s_api_handler != NULL) {
+        esp_err_t err = s_api_handler(request->uri, body, received_total,
+                                      s_api_context);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "API callback rejected %s: %s", request->uri,
+                     esp_err_to_name(err));
+            return httpd_resp_send_err(request,
+                                       HTTPD_500_INTERNAL_SERVER_ERROR,
+                                       esp_err_to_name(err));
+        }
+    } else {
+        ESP_LOGI(TAG, "Placeholder request: %s", request->uri);
+    }
+
     httpd_resp_set_status(request, "204 No Content");
     return httpd_resp_send(request, NULL, 0);
 }
@@ -413,6 +459,8 @@ static esp_err_t start_station(const esp32_wifi_drone_remote_config_t *config)
     if (s_netif == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    ESP_RETURN_ON_ERROR(esp_netif_set_hostname(s_netif, NETWORK_HOSTNAME), TAG,
+                        "Could not set station hostname");
 
     wifi_config_t wifi_config = { 0 };
     snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s",
@@ -462,6 +510,8 @@ static esp_err_t start_access_point(
     if (s_netif == NULL) {
         return ESP_ERR_NO_MEM;
     }
+    ESP_RETURN_ON_ERROR(esp_netif_set_hostname(s_netif, NETWORK_HOSTNAME), TAG,
+                        "Could not set access-point hostname");
 
     wifi_config_t wifi_config = { 0 };
     snprintf((char *)wifi_config.ap.ssid, sizeof(wifi_config.ap.ssid), "%s",
@@ -478,8 +528,7 @@ static esp_err_t start_access_point(
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &wifi_config), TAG,
                         "Could not configure access point");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Could not start access point");
-    ESP_LOGI(TAG, "Access point \"%s\" ready at http://192.168.4.1",
-             config->ap_ssid);
+    ESP_LOGI(TAG, "Access point \"%s\" ready", config->ap_ssid);
     return ESP_OK;
 }
 
@@ -503,6 +552,8 @@ esp_err_t esp32_wifi_drone_remote_start(
 
     esp32_wifi_drone_remote_config_t effective_config;
     apply_saved_station_config(config, &effective_config);
+    s_api_handler = effective_config.api_handler;
+    s_api_context = effective_config.api_context;
 
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
@@ -538,6 +589,9 @@ esp_err_t esp32_wifi_drone_remote_start(
     }
 
     if (err == ESP_OK) {
+        err = start_mdns();
+    }
+    if (err == ESP_OK) {
         err = start_webserver();
     }
     if (err != ESP_OK) {
@@ -554,6 +608,10 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     if (s_server != NULL) {
         httpd_stop(s_server);
         s_server = NULL;
+    }
+    if (s_mdns_started) {
+        mdns_free();
+        s_mdns_started = false;
     }
     esp_wifi_stop();
     if (s_netif != NULL) {
@@ -576,5 +634,7 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
         s_wifi_events = NULL;
     }
     s_started = false;
+    s_api_handler = NULL;
+    s_api_context = NULL;
     return ESP_OK;
 }
