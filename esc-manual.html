@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>Manual ESC Control</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#18212f}*{box-sizing:border-box}
+    body{margin:0;min-height:100dvh;padding:20px;background:#eef2f7}
+    main{width:min(100%,520px);margin:auto;padding:24px;border-radius:18px;
+      background:#fff;box-shadow:0 12px 40px #18212f22}
+    header{display:flex;align-items:center;gap:14px}h1{margin:0;font-size:1.4rem}
+    a{padding:10px 13px;border-radius:10px;background:#e3e8ef;color:inherit;
+      text-decoration:none}.warning{padding:14px;border-radius:12px;background:#fff0d5;
+      color:#7a4300;font-weight:650}.arm{display:flex;gap:10px;align-items:center;
+      margin:20px 0}.arm input{width:24px;height:24px}
+    .channel{margin-top:16px;padding:15px;border-radius:12px;background:#eef2f7}
+    .row{display:flex;justify-content:space-between;font-weight:750}
+    input[type=range]{width:100%;height:44px;accent-color:#e63946}
+    button{width:100%;min-height:50px;margin-top:20px;border:0;border-radius:10px;
+      background:#b51f2b;color:#fff;font:inherit;font-weight:800}
+    #status{min-height:24px;color:#657184}
+  </style>
+</head>
+<body><main>
+  <header><a href="/settings">Back</a><h1>Manual ESC control</h1></header>
+  <p class="warning">Remove all propellers before testing. Arming enables live motor output. Leaving this page sends stop to all ESCs.</p>
+  <label class="arm"><input id="armed" type="checkbox"> Enable manual motor control</label>
+  <div id="channels"></div>
+  <button id="stop" type="button">STOP ALL MOTORS</button>
+  <p id="status" role="status"></p>
+  <script>
+    const channels=document.querySelector("#channels"),armed=document.querySelector("#armed");
+    const status=document.querySelector("#status"),sliders=[];
+    for(let index=0;index<4;index++){
+      const box=document.createElement("div");box.className="channel";
+      box.innerHTML=`<div class="row"><span>ESC ${index+1}</span><output>0%</output></div>
+        <input type="range" min="0" max="1000" value="0" step="5" disabled aria-label="ESC ${index+1} throttle">`;
+      channels.append(box);const slider=box.querySelector("input"),output=box.querySelector("output");
+      sliders.push(slider);let timer;
+      slider.oninput=()=>{output.value=`${(slider.value/10).toFixed(1)}%`;
+        clearTimeout(timer);timer=setTimeout(()=>send(index,+slider.value),45)};
+    }
+    async function send(index,value){
+      if(value>0&&!armed.checked)return;
+      const response=await fetch("/api/esc-throttle",{method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams({index,throttle:value})});
+      if(!response.ok)status.textContent=`ESC ${index+1}: ${await response.text()}`;
+    }
+    function stopAll(){
+      sliders.forEach((slider,index)=>{slider.value=0;
+        slider.previousElementSibling.querySelector("output").value="0%";send(index,0)});
+      armed.checked=false;sliders.forEach(slider=>slider.disabled=true);
+      status.textContent="All motors stopped.";
+    }
+    armed.onchange=()=>{
+      sliders.forEach(slider=>slider.disabled=!armed.checked);
+      if(!armed.checked)stopAll();else status.textContent="Manual control enabled.";
+    };
+    document.querySelector("#stop").onclick=stopAll;
+    addEventListener("pagehide",()=>{for(let index=0;index<4;index++)
+      navigator.sendBeacon("/api/esc-throttle",new URLSearchParams({index,throttle:0}))});
+  </script>
+</main></body></html>

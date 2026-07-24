@@ -45,6 +45,10 @@ static void *s_telemetry_context;
 static esp32_wifi_drone_remote_imu_get_handler_t s_imu_get_handler;
 static esp32_wifi_drone_remote_imu_set_handler_t s_imu_set_handler;
 static void *s_imu_context;
+static esp32_wifi_drone_remote_esc_get_handler_t s_esc_get_handler;
+static esp32_wifi_drone_remote_esc_set_handler_t s_esc_set_handler;
+static esp32_wifi_drone_remote_esc_throttle_handler_t s_esc_throttle_handler;
+static void *s_esc_context;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
 static char s_saved_ap_ssid[33];
@@ -61,6 +65,10 @@ extern const uint8_t wifi_ap_settings_html_start[]
     asm("_binary_wifi_ap_settings_html_start");
 extern const uint8_t imu_settings_html_start[]
     asm("_binary_imu_settings_html_start");
+extern const uint8_t esc_settings_html_start[]
+    asm("_binary_esc_settings_html_start");
+extern const uint8_t esc_manual_html_start[]
+    asm("_binary_esc_manual_html_start");
 
 /**
  * @brief Advertise the controller through multicast DNS.
@@ -169,6 +177,26 @@ static esp_err_t imu_settings_page_handler(httpd_req_t *request)
     httpd_resp_set_hdr(request, "Cache-Control",
                        "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)imu_settings_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the XW30A configuration page. */
+static esp_err_t esc_settings_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)esc_settings_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the manual XW30A throttle-control page. */
+static esp_err_t esc_manual_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)esc_manual_html_start,
                            HTTPD_RESP_USE_STRLEN);
 }
 
@@ -357,6 +385,148 @@ static esp_err_t imu_config_post_handler(httpd_req_t *request)
                                    "Unsupported IMU settings");
     }
     esp_err_t err = s_imu_set_handler(&config, s_imu_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
+}
+
+/** @brief Return the active configuration for a selected ESC channel. */
+static esp_err_t esc_config_get_handler(httpd_req_t *request)
+{
+    char query[32];
+    char index_text[4];
+    if (s_esc_get_handler == NULL ||
+        httpd_req_get_url_query_str(request, query, sizeof(query)) != ESP_OK ||
+        httpd_query_key_value(query, "index", index_text,
+                              sizeof(index_text)) != ESP_OK) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "ESC index is required");
+    }
+    unsigned long index = strtoul(index_text, NULL, 10);
+    if (index >= ESP32_WIFI_DRONE_REMOTE_ESC_COUNT) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid ESC index");
+    }
+
+    esp32_wifi_drone_remote_esc_config_t config = {
+        .index = (uint8_t)index,
+    };
+    esp_err_t err = s_esc_get_handler(&config, s_esc_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    char response[192];
+    int length = snprintf(
+        response, sizeof(response),
+        "{\"index\":%u,\"gpio\":%u,\"frequency\":%u,"
+        "\"min_pulse\":%u,\"max_pulse\":%u,\"calibration_ms\":%u}",
+        config.index, config.signal_gpio, config.pwm_frequency_hz,
+        config.min_pulse_us, config.max_pulse_us,
+        config.calibration_high_time_ms);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
+}
+
+/** @brief Validate and dispatch a selected ESC channel's configuration. */
+static esp_err_t esc_config_post_handler(httpd_req_t *request)
+{
+    char body[192];
+    char index[4], gpio[4], frequency[8], min_pulse[8], max_pulse[8];
+    char calibration_ms[8];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid ESC settings");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+    if (httpd_query_key_value(body, "index", index, sizeof(index)) != ESP_OK ||
+        httpd_query_key_value(body, "gpio", gpio, sizeof(gpio)) != ESP_OK ||
+        httpd_query_key_value(body, "frequency", frequency,
+                              sizeof(frequency)) != ESP_OK ||
+        httpd_query_key_value(body, "min_pulse", min_pulse,
+                              sizeof(min_pulse)) != ESP_OK ||
+        httpd_query_key_value(body, "max_pulse", max_pulse,
+                              sizeof(max_pulse)) != ESP_OK ||
+        httpd_query_key_value(body, "calibration_ms", calibration_ms,
+                              sizeof(calibration_ms)) != ESP_OK ||
+        s_esc_set_handler == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid ESC settings");
+    }
+    unsigned long values[] = {
+        strtoul(index, NULL, 10), strtoul(gpio, NULL, 10),
+        strtoul(frequency, NULL, 10), strtoul(min_pulse, NULL, 10),
+        strtoul(max_pulse, NULL, 10), strtoul(calibration_ms, NULL, 10),
+    };
+    if (values[0] >= ESP32_WIFI_DRONE_REMOTE_ESC_COUNT ||
+        values[1] > UINT8_MAX || values[2] == 0U || values[2] > UINT16_MAX ||
+        values[3] == 0U || values[3] > UINT16_MAX ||
+        values[4] <= values[3] || values[4] > UINT16_MAX ||
+        values[5] == 0U || values[5] > UINT16_MAX ||
+        (1000000UL / values[2]) <= values[4]) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Unsupported ESC settings");
+    }
+    const esp32_wifi_drone_remote_esc_config_t config = {
+        .index = values[0],
+        .signal_gpio = values[1],
+        .pwm_frequency_hz = values[2],
+        .min_pulse_us = values[3],
+        .max_pulse_us = values[4],
+        .calibration_high_time_ms = values[5],
+    };
+    esp_err_t err = s_esc_set_handler(&config, s_esc_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
+}
+
+/** @brief Apply a manual normalized throttle value to one ESC channel. */
+static esp_err_t esc_throttle_post_handler(httpd_req_t *request)
+{
+    char body[64];
+    char index_text[4], throttle_text[8];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid ESC throttle");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+    if (httpd_query_key_value(body, "index", index_text,
+                              sizeof(index_text)) != ESP_OK ||
+        httpd_query_key_value(body, "throttle", throttle_text,
+                              sizeof(throttle_text)) != ESP_OK ||
+        s_esc_throttle_handler == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid ESC throttle");
+    }
+    unsigned long index = strtoul(index_text, NULL, 10);
+    unsigned long throttle = strtoul(throttle_text, NULL, 10);
+    if (index >= ESP32_WIFI_DRONE_REMOTE_ESC_COUNT || throttle > 1000U) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Unsupported ESC throttle");
+    }
+    esp_err_t err = s_esc_throttle_handler(
+        (uint8_t)index, (float)throttle / 1000.0f, s_esc_context);
     if (err != ESP_OK) {
         return httpd_resp_send_err(request,
                                    HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -763,7 +933,7 @@ static esp_err_t start_webserver(void)
         "/api/sound", "/api/left-stick", "/api/right-stick",
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 24;
+    config.max_uri_handlers = 32;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -809,6 +979,24 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &imu_settings_page);
+    }
+
+    const httpd_uri_t esc_settings_page = {
+        .uri = "/settings/esc",
+        .method = HTTP_GET,
+        .handler = esc_settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_settings_page);
+    }
+
+    const httpd_uri_t esc_manual_page = {
+        .uri = "/settings/esc-manual",
+        .method = HTTP_GET,
+        .handler = esc_manual_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_manual_page);
     }
 
     const httpd_uri_t wifi_config = {
@@ -863,6 +1051,33 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &imu_config_post);
+    }
+
+    const httpd_uri_t esc_config_get = {
+        .uri = "/api/esc-config",
+        .method = HTTP_GET,
+        .handler = esc_config_get_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_config_get);
+    }
+
+    const httpd_uri_t esc_config_post = {
+        .uri = "/api/esc-config",
+        .method = HTTP_POST,
+        .handler = esc_config_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_config_post);
+    }
+
+    const httpd_uri_t esc_throttle_post = {
+        .uri = "/api/esc-throttle",
+        .method = HTTP_POST,
+        .handler = esc_throttle_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_throttle_post);
     }
 
     const httpd_uri_t ap_config_get = {
@@ -1060,6 +1275,10 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_imu_get_handler = effective_config.imu_get_handler;
     s_imu_set_handler = effective_config.imu_set_handler;
     s_imu_context = effective_config.imu_context;
+    s_esc_get_handler = effective_config.esc_get_handler;
+    s_esc_set_handler = effective_config.esc_set_handler;
+    s_esc_throttle_handler = effective_config.esc_throttle_handler;
+    s_esc_context = effective_config.esc_context;
 
     s_wifi_events = xEventGroupCreate();
     if (s_wifi_events == NULL) {
@@ -1150,6 +1369,10 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_imu_get_handler = NULL;
     s_imu_set_handler = NULL;
     s_imu_context = NULL;
+    s_esc_get_handler = NULL;
+    s_esc_set_handler = NULL;
+    s_esc_throttle_handler = NULL;
+    s_esc_context = NULL;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
 }

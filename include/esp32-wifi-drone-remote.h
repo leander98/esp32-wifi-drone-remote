@@ -91,6 +91,41 @@ typedef esp_err_t (*esp32_wifi_drone_remote_imu_set_handler_t)(
     const esp32_wifi_drone_remote_imu_config_t *config,
     void *context);
 
+/** Number of independently configurable ESC channels exposed by the UI. */
+#define ESP32_WIFI_DRONE_REMOTE_ESC_COUNT 4U
+
+/** @brief Hardware and PWM settings for one brushless ESC. */
+typedef struct {
+    /** Zero-based ESC channel index. */
+    uint8_t index;
+    /** GPIO carrying the receiver-style PWM signal. */
+    uint8_t signal_gpio;
+    /** PWM repetition frequency in hertz. */
+    uint16_t pwm_frequency_hz;
+    /** Pulse width representing minimum throttle, in microseconds. */
+    uint16_t min_pulse_us;
+    /** Pulse width representing maximum throttle, in microseconds. */
+    uint16_t max_pulse_us;
+    /** Duration of the high calibration pulse, in milliseconds. */
+    uint16_t calibration_high_time_ms;
+} esp32_wifi_drone_remote_esc_config_t;
+
+/** @brief Return the active settings for one ESC channel. */
+typedef esp_err_t (*esp32_wifi_drone_remote_esc_get_handler_t)(
+    esp32_wifi_drone_remote_esc_config_t *config,
+    void *context);
+
+/** @brief Validate, apply, and persist settings for one ESC channel. */
+typedef esp_err_t (*esp32_wifi_drone_remote_esc_set_handler_t)(
+    const esp32_wifi_drone_remote_esc_config_t *config,
+    void *context);
+
+/** @brief Apply manual normalized throttle to one ESC channel. */
+typedef esp_err_t (*esp32_wifi_drone_remote_esc_throttle_handler_t)(
+    uint8_t index,
+    float throttle,
+    void *context);
+
 /**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
@@ -129,6 +164,14 @@ typedef struct {
     esp32_wifi_drone_remote_imu_set_handler_t imu_set_handler;
     /** Application value passed to both IMU settings callbacks. */
     void *imu_context;
+    /** Optional callback returning one ESC channel's settings. */
+    esp32_wifi_drone_remote_esc_get_handler_t esc_get_handler;
+    /** Optional callback applying one ESC channel's settings. */
+    esp32_wifi_drone_remote_esc_set_handler_t esc_set_handler;
+    /** Optional callback applying manual ESC throttle. */
+    esp32_wifi_drone_remote_esc_throttle_handler_t esc_throttle_handler;
+    /** Application value passed to all ESC callbacks. */
+    void *esc_context;
 } esp32_wifi_drone_remote_config_t;
 
 /**
@@ -153,6 +196,10 @@ typedef struct {
         .imu_get_handler = NULL,                                        \
         .imu_set_handler = NULL,                                        \
         .imu_context = NULL,                                            \
+        .esc_get_handler = NULL,                                        \
+        .esc_set_handler = NULL,                                        \
+        .esc_throttle_handler = NULL,                                   \
+        .esc_context = NULL,                                            \
     }
 
 /**
