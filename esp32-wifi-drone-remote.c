@@ -9,6 +9,7 @@
 #include <esp_netif.h>
 #include <esp_system.h>
 #include <esp_wifi.h>
+#include <esp_wifi_ap_get_sta_list.h>
 #include <esp_wifi_default.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
@@ -16,6 +17,7 @@
 #include <mdns.h>
 #include <nvs.h>
 #include <nvs_flash.h>
+#include <lwip/sockets.h>
 
 #include "esp32-wifi-drone-remote.h"
 
@@ -31,6 +33,7 @@ static esp_netif_t *s_netif;
 static httpd_handle_t s_server;
 static bool s_started;
 static bool s_mdns_started;
+static wifi_mode_t s_wifi_mode = WIFI_MODE_NULL;
 static esp32_wifi_drone_remote_api_handler_t s_api_handler;
 static void *s_api_context;
 static char s_saved_station_ssid[33];
@@ -115,6 +118,61 @@ static esp_err_t wifi_setup_page_handler(httpd_req_t *request)
     httpd_resp_set_type(request, "text/html");
     return httpd_resp_send(request, (const char *)wifi_setup_html_start,
                            HTTPD_RESP_USE_STRLEN);
+}
+
+/**
+ * @brief Return the Wi-Fi mode and RSSI visible to the requesting browser.
+ *
+ * In station mode the RSSI belongs to the upstream access point. In
+ * access-point mode it belongs to the station making this HTTP request.
+ *
+ * @param request HTTP GET request for `/api/status`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
+static esp_err_t status_handler(httpd_req_t *request)
+{
+    int rssi = -127;
+    const char *mode = "unknown";
+
+    if (s_wifi_mode == WIFI_MODE_STA) {
+        wifi_ap_record_t access_point;
+        mode = "sta";
+        if (esp_wifi_sta_get_ap_info(&access_point) == ESP_OK) {
+            rssi = access_point.rssi;
+        }
+    } else if (s_wifi_mode == WIFI_MODE_AP) {
+        wifi_sta_list_t stations;
+        mode = "ap";
+        if (esp_wifi_ap_get_sta_list(&stations) == ESP_OK &&
+            stations.num > 0) {
+            int selected = 0;
+            struct sockaddr_in peer;
+            socklen_t peer_length = sizeof(peer);
+            int socket = httpd_req_to_sockfd(request);
+            wifi_sta_mac_ip_list_t station_ips;
+
+            if (getpeername(socket, (struct sockaddr *)&peer,
+                            &peer_length) == 0 &&
+                esp_wifi_ap_get_sta_list_with_ip(&stations, &station_ips) ==
+                    ESP_OK) {
+                for (int i = 0; i < stations.num; ++i) {
+                    if (station_ips.sta[i].ip.addr ==
+                        peer.sin_addr.s_addr) {
+                        selected = i;
+                        break;
+                    }
+                }
+            }
+            rssi = stations.sta[selected].rssi;
+        }
+    }
+
+    char response[48];
+    int length = snprintf(response, sizeof(response),
+                          "{\"mode\":\"%s\",\"rssi\":%d}", mode, rssi);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
 }
 
 /**
@@ -394,6 +452,15 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &wifi_config);
     }
 
+    const httpd_uri_t status = {
+        .uri = "/api/status",
+        .method = HTTP_GET,
+        .handler = status_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &status);
+    }
+
     for (size_t i = 0; err == ESP_OK &&
          i < sizeof(api_paths) / sizeof(api_paths[0]); ++i) {
         const httpd_uri_t api = {
@@ -475,6 +542,7 @@ static esp_err_t start_station(const esp32_wifi_drone_remote_config_t *config)
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &wifi_config), TAG,
                         "Could not configure station");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Could not start station");
+    s_wifi_mode = WIFI_MODE_STA;
 
     EventBits_t bits = xEventGroupWaitBits(
         s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT, pdTRUE, pdFALSE,
@@ -528,6 +596,7 @@ static esp_err_t start_access_point(
     ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_AP, &wifi_config), TAG,
                         "Could not configure access point");
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Could not start access point");
+    s_wifi_mode = WIFI_MODE_AP;
     ESP_LOGI(TAG, "Access point \"%s\" ready", config->ap_ssid);
     return ESP_OK;
 }
@@ -636,5 +705,6 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_started = false;
     s_api_handler = NULL;
     s_api_context = NULL;
+    s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
 }

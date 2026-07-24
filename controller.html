@@ -11,10 +11,28 @@
       font-family: system-ui, sans-serif;
       color: #242424;
       background: #f5f7fa;
+      --page: #f5f7fa;
+      --panel: #fff;
+      --text: #242424;
+      --muted: #7b8491;
+      --stick-center: #d2d5da;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; }
-    body { min-height: 100dvh; overscroll-behavior: none; }
+    body {
+      min-height: 100dvh;
+      overscroll-behavior: none;
+      color: var(--text);
+      background: var(--page);
+      transition: color .2s, background .2s;
+    }
+    body.dark {
+      --page: #0e131b;
+      --panel: #1a2230;
+      --text: #eef3f8;
+      --muted: #a9b4c2;
+      --stick-center: #3b4655;
+    }
     header {
       height: 56px;
       padding: max(7px, env(safe-area-inset-top))
@@ -28,6 +46,36 @@
     }
     .status { font-size: .85rem; opacity: .8; }
     .toolbar { display: flex; gap: 8px; }
+    .network-status {
+      display: none;
+      align-items: center;
+      gap: 9px;
+      min-width: 116px;
+      font-size: .83rem;
+      font-variant-numeric: tabular-nums;
+    }
+    :fullscreen .network-status { display: flex; }
+    :-webkit-full-screen .network-status { display: flex; }
+    .signal {
+      height: 22px;
+      display: flex;
+      align-items: end;
+      gap: 2px;
+    }
+    .signal i {
+      display: block;
+      width: 4px;
+      border-radius: 2px;
+      background: #667386;
+    }
+    .signal i:nth-child(1) { height: 5px; }
+    .signal i:nth-child(2) { height: 10px; }
+    .signal i:nth-child(3) { height: 15px; }
+    .signal i:nth-child(4) { height: 20px; }
+    .signal[data-bars="1"] i:nth-child(-n+1),
+    .signal[data-bars="2"] i:nth-child(-n+2),
+    .signal[data-bars="3"] i:nth-child(-n+3),
+    .signal[data-bars="4"] i:nth-child(-n+4) { background: #54d17a; }
     button {
       border: 0;
       border-radius: 12px;
@@ -59,7 +107,9 @@
       border: 2px solid #303846;
       border-radius: 50%;
       margin: auto;
-      background: radial-gradient(circle, #d2d5da 0 24%, #fff 25%);
+      background: radial-gradient(
+        circle, var(--stick-center) 0 24%, var(--panel) 25%
+      );
       touch-action: none;
     }
     .knob {
@@ -89,7 +139,7 @@
       height: 170px;
       border: 1px solid #9ba4b2;
       border-radius: 14px;
-      background: white;
+      background: var(--panel);
       display: grid;
       place-items: center;
       color: #7b8491;
@@ -123,6 +173,12 @@
       <b>ESP32 Drone Remote</b>
       <div class="status" id="status">Ready</div>
     </div>
+    <div class="network-status" aria-live="polite">
+      <span class="signal" id="signal" data-bars="0"
+            aria-label="Signal unavailable"><i></i><i></i><i></i><i></i></span>
+      <span id="network-mode">--</span>
+      <span id="ping">-- ms</span>
+    </div>
     <div class="toolbar">
       <button id="fullscreen" class="secondary">Fullscreen</button>
       <button id="connect">Connect</button>
@@ -143,7 +199,8 @@
     <section class="center">
       <div class="toolbar">
         <button data-api="turn-lock">Turn lock</button>
-        <button class="secondary" data-api="brightness">Brightness</button>
+        <button id="brightness" class="secondary"
+                data-api="brightness">Brightness</button>
       </div>
       <div class="toolbar">
         <button class="secondary" data-api="headlight">Headlight</button>
@@ -167,6 +224,16 @@
   </div>
   <script>
     const statusEl = document.querySelector("#status");
+    const signalEl = document.querySelector("#signal");
+    const pingEl = document.querySelector("#ping");
+    const networkModeEl = document.querySelector("#network-mode");
+    let statusTimer;
+
+    try {
+      document.body.classList.toggle(
+        "dark", localStorage.getItem("drone-theme") === "dark"
+      );
+    } catch (error) {}
 
     async function send(name, body = {}) {
       statusEl.textContent = `Sending ${name}…`;
@@ -186,21 +253,85 @@
     document.querySelectorAll("[data-api]").forEach((button) => {
       button.onclick = () => send(button.dataset.api);
     });
+    document.querySelector("#brightness").addEventListener("click", () => {
+      const dark = document.body.classList.toggle("dark");
+      try {
+        localStorage.setItem("drone-theme", dark ? "dark" : "light");
+      } catch (error) {}
+    });
     document.querySelector("#connect").onclick = () => {
       window.location.href = "/wifi";
     };
+
+    async function lockLandscape() {
+      if (!screen.orientation?.lock) return false;
+      try {
+        await screen.orientation.lock("landscape-primary");
+        return true;
+      } catch (primaryError) {
+        try {
+          await screen.orientation.lock("landscape");
+          return true;
+        } catch (landscapeError) {
+          return false;
+        }
+      }
+    }
+
     document.querySelector("#fullscreen").onclick = async () => {
       try {
         if (!document.fullscreenElement) {
           await document.documentElement.requestFullscreen();
-          if (screen.orientation?.lock) await screen.orientation.lock("landscape");
+          if (!await lockLandscape()) {
+            statusEl.textContent =
+              "Fullscreen active; this browser cannot lock orientation";
+          }
         } else {
+          if (screen.orientation?.unlock) screen.orientation.unlock();
           await document.exitFullscreen();
         }
       } catch (error) {
         statusEl.textContent = "Fullscreen is unavailable in this browser";
       }
     };
+
+    async function updateNetworkStatus() {
+      const started = performance.now();
+      try {
+        const response = await fetch("/api/status", { cache: "no-store" });
+        const info = await response.json();
+        const ping = Math.round(performance.now() - started);
+        const bars = info.rssi >= -55 ? 4
+          : info.rssi >= -65 ? 3
+          : info.rssi >= -75 ? 2
+          : info.rssi > -127 ? 1 : 0;
+        signalEl.dataset.bars = bars;
+        signalEl.setAttribute(
+          "aria-label", bars ? `Signal ${info.rssi} dBm` : "Signal unavailable"
+        );
+        networkModeEl.textContent = info.mode.toUpperCase();
+        pingEl.textContent = `${ping} ms`;
+      } catch (error) {
+        signalEl.dataset.bars = 0;
+        networkModeEl.textContent = "--";
+        pingEl.textContent = "-- ms";
+      }
+    }
+
+    function fullscreenChanged() {
+      const fullscreen = document.fullscreenElement
+        || document.webkitFullscreenElement;
+      clearInterval(statusTimer);
+      if (fullscreen) {
+        lockLandscape();
+        updateNetworkStatus();
+        statusTimer = setInterval(updateNetworkStatus, 2000);
+      } else if (screen.orientation?.unlock) {
+        screen.orientation.unlock();
+      }
+    }
+    document.addEventListener("fullscreenchange", fullscreenChanged);
+    document.addEventListener("webkitfullscreenchange", fullscreenChanged);
 
     document.querySelectorAll("[data-stick]").forEach((stick) => {
       let active = false;

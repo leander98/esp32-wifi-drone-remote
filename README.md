@@ -43,6 +43,12 @@ areas, limits joystick requests to 20 updates per second, and provides a
 fullscreen button. Fullscreen and orientation locking depend on browser
 support and require a user gesture.
 
+The Brightness button toggles a persistent light/dark theme while continuing
+to invoke the configurable `/api/brightness` control endpoint. Fullscreen
+mode displays Wi-Fi signal bars and HTTP round-trip latency to the ESP32. In
+station mode RSSI is measured by the ESP32 against its upstream access point;
+in access-point mode RSSI is selected for the phone requesting the status.
+
 ```c
 #include "esp32-wifi-drone-remote.h"
 
