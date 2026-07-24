@@ -1,0 +1,23 @@
+menu "Wi-Fi drone remote configuration"
+
+    config ESP32_WIFI_DRONE_REMOTE_AP_SSID
+        string "Access point SSID"
+        default "ESP32-Drone-Remote"
+        help
+            SSID advertised by the drone remote access point.
+
+    config ESP32_WIFI_DRONE_REMOTE_AP_PASSWORD
+        string "Access point password"
+        default "esp32drone"
+        help
+            WPA2 password for the drone remote access point. Use at least
+            eight characters.
+
+    config ESP32_WIFI_DRONE_REMOTE_MAX_CONNECTIONS
+        int "Maximum simultaneous connections"
+        range 1 10
+        default 4
+        help
+            Maximum number of stations allowed to connect to the access point.
+
+endmenu
