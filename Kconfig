@@ -20,4 +20,25 @@ menu "Wi-Fi drone remote configuration"
         help
             Maximum number of stations allowed to connect to the access point.
 
+    config ESP32_WIFI_DRONE_REMOTE_STA_SSID
+        string "Existing Wi-Fi network SSID"
+        default ""
+        help
+            If non-empty, the component first tries to join this network.
+            It creates its own access point if the connection fails.
+
+    config ESP32_WIFI_DRONE_REMOTE_STA_PASSWORD
+        string "Existing Wi-Fi network password"
+        default ""
+        help
+            Password used when joining the existing Wi-Fi network.
+
+    config ESP32_WIFI_DRONE_REMOTE_STA_TIMEOUT_MS
+        int "Existing network connection timeout (ms)"
+        range 1000 60000
+        default 10000
+        help
+            Time to wait for an IP address before falling back to access-point
+            mode.
+
 endmenu

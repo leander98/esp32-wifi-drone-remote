@@ -1,11 +1,11 @@
 # ESP32 Wi-Fi drone remote component
 
-ESP-IDF component for a Wi-Fi server that provides a browser-based drone
-controller.
+ESP-IDF component providing a browser-based drone controller. It tries to join
+the configured Wi-Fi network first and falls back to its own access point when
+that connection fails. The controller is then served over HTTP.
 
-The component currently contains the public API and configuration scaffold.
-Wi-Fi access-point setup, the HTTP server, the controller page, and control
-message handling still need to be implemented.
+The embedded page source is kept in `controller.html` and can be edited
+without changing the C implementation.
 
 ## Adding the component
 
@@ -22,8 +22,13 @@ idf_component_register(
 
 ## Configuration
 
-The access-point SSID, password, and connection limit can be configured under
+The access-point SSID, password, connection limit, optional existing-network
+credentials, and connection timeout can be configured under
 `Component config > Wi-Fi drone remote configuration`.
+
+Leave the existing-network SSID empty to always use access-point mode. In
+access-point mode, connect to the configured SSID and open
+`http://192.168.4.1`.
 
 ```c
 #include "esp32-wifi-drone-remote.h"
@@ -37,5 +42,21 @@ void app_main(void)
 }
 ```
 
-The start and stop functions currently return `ESP_ERR_NOT_SUPPORTED` until
-the component implementation is added.
+## Placeholder API
+
+The page sends JSON `POST` requests to these endpoints:
+
+| Endpoint | Control |
+| --- | --- |
+| `/api/connect` | Connect button |
+| `/api/settings` | Settings button |
+| `/api/turn-lock` | Turn-lock button |
+| `/api/brightness` | Brightness button |
+| `/api/headlight` | Headlight button |
+| `/api/sound` | Sound button |
+| `/api/left-stick` | Throttle/turn stick |
+| `/api/right-stick` | Direction stick |
+
+Stick request bodies have the form `{"x": 0.0, "y": 0.0}`, with both values
+normalized to the range -1 through 1. All endpoint handlers currently consume
+the request, log its URI, and return HTTP 204 without controlling hardware.

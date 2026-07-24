@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport"
+        content="width=device-width,initial-scale=1,user-scalable=no">
+  <title>ESP32 Drone Remote</title>
+  <style>
+    :root {
+      font-family: system-ui, sans-serif;
+      color: #242424;
+      background: #f5f7fa;
+    }
+    * { box-sizing: border-box; touch-action: none; }
+    body { margin: 0; min-height: 100vh; }
+    header {
+      min-height: 64px;
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: #18212f;
+      color: white;
+    }
+    .status { font-size: .85rem; opacity: .8; }
+    .toolbar { display: flex; gap: 8px; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      background: #e63946;
+      color: white;
+      padding: 11px 15px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button.secondary { background: #3b4c63; }
+    .controls {
+      display: grid;
+      grid-template-columns: 1fr minmax(180px, .55fr) 1fr;
+      gap: 24px;
+      align-items: center;
+      max-width: 1100px;
+      margin: auto;
+      padding: 26px 18px;
+    }
+    .stick-card { text-align: center; }
+    .stick {
+      position: relative;
+      width: min(38vw, 310px);
+      aspect-ratio: 1;
+      border: 2px solid #303846;
+      border-radius: 50%;
+      margin: auto;
+      background: radial-gradient(circle, #d2d5da 0 24%, #fff 25%);
+    }
+    .knob {
+      position: absolute;
+      left: 50%;
+      top: 50%;
+      width: 31%;
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: #aeb4bd;
+      transform: translate(-50%, -50%);
+      box-shadow: 0 5px 16px #0003;
+    }
+    .label {
+      position: absolute;
+      color: #d21f2b;
+      font-weight: 750;
+      pointer-events: none;
+    }
+    .up { top: 8%; left: 50%; transform: translateX(-50%); }
+    .down { bottom: 8%; left: 50%; transform: translateX(-50%); }
+    .left { left: 5%; top: 50%; transform: translateY(-50%); }
+    .right { right: 5%; top: 50%; transform: translateY(-50%); }
+    .center { display: grid; gap: 12px; }
+    .center button { width: 100%; }
+    .telemetry {
+      height: 170px;
+      border: 1px solid #9ba4b2;
+      border-radius: 14px;
+      background: white;
+      display: grid;
+      place-items: center;
+      color: #7b8491;
+    }
+    @media (max-width: 760px) {
+      .controls { grid-template-columns: 1fr 1fr; }
+      .center { grid-column: 1 / -1; grid-row: 2; }
+      .stick { width: min(44vw, 300px); }
+      header { height: auto; gap: 8px; flex-wrap: wrap; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <b>ESP32 Drone Remote</b>
+      <div class="status" id="status">Ready</div>
+    </div>
+    <div class="toolbar">
+      <button data-api="connect">Connect</button>
+      <button class="secondary" data-api="settings">Settings</button>
+    </div>
+  </header>
+  <main class="controls">
+    <section class="stick-card">
+      <h2>Throttle / Turn</h2>
+      <div class="stick" data-stick="left">
+        <span class="label up">Thrust</span>
+        <span class="label down">Down</span>
+        <span class="label left">Turn left</span>
+        <span class="label right">Turn right</span>
+        <div class="knob"></div>
+      </div>
+    </section>
+    <section class="center">
+      <div class="toolbar">
+        <button data-api="turn-lock">Turn lock</button>
+        <button class="secondary" data-api="brightness">Brightness</button>
+      </div>
+      <div class="toolbar">
+        <button class="secondary" data-api="headlight">Headlight</button>
+        <button class="secondary" data-api="sound">Sound</button>
+      </div>
+      <div class="telemetry">Telemetry placeholder</div>
+    </section>
+    <section class="stick-card">
+      <h2>Direction</h2>
+      <div class="stick" data-stick="right">
+        <span class="label up">Forward</span>
+        <span class="label down">Backward</span>
+        <span class="label left">Left</span>
+        <span class="label right">Right</span>
+        <div class="knob"></div>
+      </div>
+    </section>
+  </main>
+  <script>
+    const statusEl = document.querySelector("#status");
+
+    async function send(name, body = {}) {
+      statusEl.textContent = `Sending ${name}…`;
+      try {
+        const response = await fetch(`/api/${name}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        statusEl.textContent =
+          response.ok ? "Ready" : `Request failed: ${response.status}`;
+      } catch (error) {
+        statusEl.textContent = "Connection lost";
+      }
+    }
+
+    document.querySelectorAll("[data-api]").forEach((button) => {
+      button.onclick = () => send(button.dataset.api);
+    });
+
+    document.querySelectorAll("[data-stick]").forEach((stick) => {
+      let active = false;
+      const knob = stick.querySelector(".knob");
+      const name = `${stick.dataset.stick}-stick`;
+
+      function move(event) {
+        if (!active) return;
+        const bounds = stick.getBoundingClientRect();
+        let x = (event.clientX - bounds.left - bounds.width / 2)
+          / (bounds.width / 2);
+        let y = (bounds.top + bounds.height / 2 - event.clientY)
+          / (bounds.height / 2);
+        const magnitude = Math.hypot(x, y);
+        if (magnitude > 1) {
+          x /= magnitude;
+          y /= magnitude;
+        }
+        knob.style.transform =
+          `translate(calc(-50% + ${x * bounds.width * .32}px), `
+          + `calc(-50% + ${-y * bounds.height * .32}px))`;
+        send(name, { x: +x.toFixed(3), y: +y.toFixed(3) });
+      }
+
+      stick.onpointerdown = (event) => {
+        active = true;
+        stick.setPointerCapture(event.pointerId);
+        move(event);
+      };
+      stick.onpointermove = move;
+      stick.onpointerup = stick.onpointercancel = () => {
+        active = false;
+        knob.style.transform = "translate(-50%, -50%)";
+        send(name, { x: 0, y: 0 });
+      };
+    });
+  </script>
+</body>
+</html>
