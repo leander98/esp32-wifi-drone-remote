@@ -380,14 +380,19 @@ static esp_err_t pid_config_get_handler(httpd_req_t *request)
         httpd_resp_set_status(request, "503 Service Unavailable");
         return httpd_resp_sendstr(request, esp_err_to_name(err));
     }
-    char response[320];
+    char response[500];
     int length = snprintf(response, sizeof(response),
         "{\"roll_kp\":%.6g,\"roll_ki\":%.6g,\"roll_kd\":%.6g,"
         "\"pitch_kp\":%.6g,\"pitch_ki\":%.6g,\"pitch_kd\":%.6g,"
-        "\"yaw_kp\":%.6g,\"yaw_ki\":%.6g,\"yaw_kd\":%.6g}",
+        "\"yaw_kp\":%.6g,\"yaw_ki\":%.6g,\"yaw_kd\":%.6g,"
+        "\"altitude_kp\":%.6g,\"altitude_ki\":%.6g,\"altitude_kd\":%.6g,"
+        "\"armed_idle_percent\":%.4g,\"stabilize_at_idle\":%s}",
         config.roll_kp, config.roll_ki, config.roll_kd,
         config.pitch_kp, config.pitch_ki, config.pitch_kd,
-        config.yaw_kp, config.yaw_ki, config.yaw_kd);
+        config.yaw_kp, config.yaw_ki, config.yaw_kd,
+        config.altitude_kp, config.altitude_ki, config.altitude_kd,
+        config.armed_idle_throttle * 100.0f,
+        config.stabilize_at_minimum_throttle ? "true" : "false");
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, response, length);
@@ -413,13 +418,15 @@ static esp_err_t pid_config_post_handler(httpd_req_t *request)
         "roll_kp", "roll_ki", "roll_kd",
         "pitch_kp", "pitch_ki", "pitch_kd",
         "yaw_kp", "yaw_ki", "yaw_kd",
+        "altitude_kp", "altitude_ki", "altitude_kd",
     };
     float *values[] = {
         &config.roll_kp, &config.roll_ki, &config.roll_kd,
         &config.pitch_kp, &config.pitch_ki, &config.pitch_kd,
         &config.yaw_kp, &config.yaw_ki, &config.yaw_kd,
+        &config.altitude_kp, &config.altitude_ki, &config.altitude_kd,
     };
-    for (size_t index = 0; index < 9U; ++index) {
+    for (size_t index = 0; index < 12U; ++index) {
         char text[24];
         char *end = NULL;
         if (httpd_query_key_value(body, names[index], text,
@@ -433,6 +440,25 @@ static esp_err_t pid_config_post_handler(httpd_req_t *request)
             return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                        "PID gains must be between 0 and 10");
         }
+    }
+    char idle_text[24];
+    char stabilize_text[4];
+    char *idle_end = NULL;
+    if (httpd_query_key_value(body, "armed_idle_percent", idle_text,
+                              sizeof(idle_text)) != ESP_OK) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Missing armed-idle output");
+    }
+    config.armed_idle_throttle = strtof(idle_text, &idle_end) / 100.0f;
+    config.stabilize_at_minimum_throttle =
+        httpd_query_key_value(body, "stabilize_at_idle", stabilize_text,
+                              sizeof(stabilize_text)) == ESP_OK;
+    if (idle_end == idle_text || *idle_end != '\0' ||
+        !isfinite(config.armed_idle_throttle) ||
+        config.armed_idle_throttle < 0.01f ||
+        config.armed_idle_throttle > 0.30f) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Armed-idle output must be 1 to 30 percent");
     }
     if (s_pid_set_handler == NULL) {
         httpd_resp_set_status(request, "503 Service Unavailable");

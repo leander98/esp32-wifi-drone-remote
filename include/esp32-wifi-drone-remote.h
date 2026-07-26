@@ -102,6 +102,11 @@ typedef struct {
     float yaw_kp;
     float yaw_ki;
     float yaw_kd;
+    float altitude_kp;
+    float altitude_ki;
+    float altitude_kd;
+    float armed_idle_throttle;
+    bool stabilize_at_minimum_throttle;
 } esp32_wifi_drone_remote_pid_config_t;
 
 /** @brief Return the active flight-controller PID gains. */

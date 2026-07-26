@@ -20,6 +20,8 @@
     label { font-weight:700; }
     input { width:100%; min-height:46px; margin-top:6px; padding:9px;
       border:1px solid #aab3c0; border-radius:10px; font:16px system-ui; }
+    .switch { display:flex; align-items:center; gap:10px; margin-top:18px; }
+    .switch input { width:22px; min-height:22px; margin:0; }
     button { width:100%; min-height:48px; margin-top:24px; border:0;
       border-radius:10px; background:#e63946; color:white; font:inherit;
       font-weight:750; cursor:pointer; }
@@ -59,6 +61,24 @@
       <label>Kd<input name="yaw_kd" type="number" min="0" max="10"
         step="0.0001" required></label>
     </div>
+    <h2>Vertical velocity (accelerometer)</h2>
+    <div class="gains">
+      <label>Kp<input name="altitude_kp" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Ki<input name="altitude_ki" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Kd<input name="altitude_kd" type="number" min="0" max="10"
+        step="0.0001" required></label>
+    </div>
+    <h2>Armed idle</h2>
+    <label>Motor idle output (%)
+      <input name="armed_idle_percent" type="number" min="1" max="30"
+        step="0.1" required>
+    </label>
+    <label class="switch">
+      <input name="stabilize_at_idle" type="checkbox" value="1">
+      Stabilize attitude at minimum throttle
+    </label>
     <button type="submit">Apply PID gains</button>
     <p id="status" role="status"></p>
   </form>
@@ -69,7 +89,11 @@
       const response=await fetch("/api/pid-config",{cache:"no-store"});
       if (!response.ok) throw new Error(await response.text());
       const values=await response.json();
-      Object.entries(values).forEach(([key,value]) => form[key].value=value);
+      Object.entries(values).forEach(([key,value]) => {
+        if (!form[key]) return;
+        if (form[key].type==="checkbox") form[key].checked=Boolean(value);
+        else form[key].value=value;
+      });
     }
     load().catch(error => status.textContent=`Could not load: ${error.message}`);
     form.onsubmit=async event => {
