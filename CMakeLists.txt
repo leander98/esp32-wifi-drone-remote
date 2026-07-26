@@ -6,5 +6,5 @@ idf_component_register(
                    "settings.html" "wifi-ap-settings.html"
                    "imu-settings.html" "esc-settings.html"
                    "esc-pwm-channel-settings.html"
-                   "esc-manual.html"
+                   "esc-manual.html" "esc-programming.html"
 )

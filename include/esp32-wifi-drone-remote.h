@@ -126,6 +126,23 @@ typedef esp_err_t (*esp32_wifi_drone_remote_esc_throttle_handler_t)(
     float throttle,
     void *context);
 
+/** @brief ESC programming operations issued by the guided web page. */
+typedef enum {
+    ESP32_WIFI_ESC_PROGRAM_BEGIN = 0,
+    ESP32_WIFI_ESC_PROGRAM_SELECT_ITEM,
+    ESP32_WIFI_ESC_PROGRAM_STORE_VALUE,
+    ESP32_WIFI_ESC_PROGRAM_CONTINUE,
+    ESP32_WIFI_ESC_PROGRAM_EXIT,
+    ESP32_WIFI_ESC_PROGRAM_CANCEL,
+} esp32_wifi_drone_remote_esc_program_action_t;
+
+/** @brief Execute one step of the manual's audible ESC programming flow. */
+typedef esp_err_t (*esp32_wifi_drone_remote_esc_program_handler_t)(
+    uint8_t index,
+    esp32_wifi_drone_remote_esc_program_action_t action,
+    uint8_t selection,
+    void *context);
+
 /**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
@@ -170,6 +187,8 @@ typedef struct {
     esp32_wifi_drone_remote_esc_set_handler_t esc_set_handler;
     /** Optional callback applying manual ESC throttle. */
     esp32_wifi_drone_remote_esc_throttle_handler_t esc_throttle_handler;
+    /** Optional callback executing guided ESC programming commands. */
+    esp32_wifi_drone_remote_esc_program_handler_t esc_program_handler;
     /** Application value passed to all ESC callbacks. */
     void *esc_context;
 } esp32_wifi_drone_remote_config_t;
@@ -199,6 +218,7 @@ typedef struct {
         .esc_get_handler = NULL,                                        \
         .esc_set_handler = NULL,                                        \
         .esc_throttle_handler = NULL,                                   \
+        .esc_program_handler = NULL,                                    \
         .esc_context = NULL,                                            \
     }
 

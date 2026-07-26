@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>ESC Programming</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#18212f}*{box-sizing:border-box}
+    body{margin:0;min-height:100dvh;padding:20px;background:#eef2f7}
+    main{width:min(100%,560px);margin:auto;padding:24px;border-radius:18px;
+      background:#fff;box-shadow:0 12px 40px #18212f22}
+    header{display:flex;align-items:center;gap:14px}h1{margin:0;font-size:1.4rem}
+    a{padding:10px 13px;border-radius:10px;background:#e3e8ef;color:inherit;
+      text-decoration:none}label{display:block;margin-top:18px;font-weight:700}
+    select,button{width:100%;min-height:48px;margin-top:8px;padding:10px;
+      border:0;border-radius:10px;font:inherit}
+    select{border:1px solid #aab3c0;background:#fff}
+    button{background:#e63946;color:#fff;font-weight:750}
+    button.secondary{background:#dce3eb;color:#18212f}
+    button.danger{background:#8d1722}
+    .warning{padding:14px;border-radius:12px;background:#fff0d5;color:#713f00;
+      font-weight:650;line-height:1.45}
+    .panel{margin-top:18px;padding:16px;border-radius:12px;background:#eef2f7}
+    .panel h2{margin:0 0 8px;font-size:1.1rem}.panel p{color:#566274}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+    .grid button{margin:0}.tone{display:block;font-weight:400;font-size:.86rem}
+    #status{min-height:24px;color:#566274}[hidden]{display:none}
+  </style>
+</head>
+<body><main>
+  <header><a href="/settings/esc">Back</a><h1>ESC programming</h1></header>
+  <p class="warning">Remove all propellers. Disconnect the selected ESC battery
+    before starting. The motor must remain connected because it emits the menu
+    tones.</p>
+  <label for="index">ESC channel</label>
+  <select id="index">
+    <option value="0">ESC 1</option><option value="1">ESC 2</option>
+    <option value="2">ESC 3</option><option value="3">ESC 4</option>
+  </select>
+  <button id="begin">Begin programming at full throttle</button>
+
+  <section class="panel" id="items" hidden>
+    <h2>Connect the ESC battery and listen</h2>
+    <p>After two beeps and the “56712” entry tone, select an item exactly when
+      its tone is announced. The eight tones repeat every three seconds.</p>
+    <div class="grid" id="item-buttons"></div>
+  </section>
+
+  <section class="panel" id="values" hidden>
+    <h2 id="value-title">Select value</h2>
+    <p>Press the matching value while its one-, two-, or three-beep tone is
+      audible.</p>
+    <div class="grid" id="value-buttons"></div>
+  </section>
+
+  <section class="panel" id="finish" hidden>
+    <h2>Setting sent</h2>
+    <p>Wait for confirmation tone “1515”. Then continue at full throttle, or
+      exit at minimum throttle within two seconds.</p>
+    <button id="continue">Continue programming</button>
+    <button class="secondary" id="exit">Exit programming</button>
+  </section>
+
+  <button class="danger" id="cancel" hidden>Cancel and set minimum throttle</button>
+  <p id="status" role="status"></p>
+  <script>
+    const index=document.querySelector("#index"),begin=document.querySelector("#begin");
+    const items=document.querySelector("#items"),values=document.querySelector("#values");
+    const finish=document.querySelector("#finish"),cancel=document.querySelector("#cancel");
+    const status=document.querySelector("#status"),itemButtons=document.querySelector("#item-buttons");
+    const valueButtons=document.querySelector("#value-buttons"),valueTitle=document.querySelector("#value-title");
+    const definitions=[
+      ["Brake",["Off","On"]],["Battery type",["Li-ion / Li-poly","NiMH / NiCd"]],
+      ["Cut-off mode",["Soft cut-off","Hard cut-off"]],
+      ["Cut-off threshold",["Low","Medium","High"]],
+      ["Start mode",["Normal","Soft","Super Soft"]],
+      ["Timing",["Low","Medium","High"]],
+      ["Factory defaults",[]],["Exit",[]]
+    ];
+    let active=false;
+    async function command(action,selection=0){
+      const response=await fetch("/api/esc-programming",{method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams({index:index.value,action,selection})});
+      if(!response.ok)throw new Error(await response.text());
+    }
+    function show(section){
+      items.hidden=section!=="items";values.hidden=section!=="values";
+      finish.hidden=section!=="finish";
+    }
+    definitions.forEach(([name],offset)=>{
+      const item=offset+1,button=document.createElement("button");
+      button.className="secondary";
+      const tone=item<=4?`Beep × ${item}`:item===5?"Long":
+        item<=7?`Long + Beep × ${item-5}`:"Long × 2";
+      button.innerHTML=`${item}. ${name}<span class="tone">${tone}</span>`;
+      button.onclick=async()=>{
+        try{
+          await command(1,item);
+          if(item===8){active=false;show("");cancel.hidden=true;
+            status.textContent="Programming exited."}
+          else if(item===7){show("finish");status.textContent="Factory defaults selected."}
+          else{renderValues(item);show("values");status.textContent=`${name} selected.`}
+        }catch(error){status.textContent=`Could not select item: ${error.message}`}
+      };
+      itemButtons.append(button);
+    });
+    function renderValues(item){
+      const [name,options]=definitions[item-1];valueTitle.textContent=name;
+      valueButtons.replaceChildren();
+      options.forEach((option,offset)=>{
+        const button=document.createElement("button");button.className="secondary";
+        button.textContent=`${"Beep-".repeat(offset+1).slice(0,-1)}: ${option}`;
+        button.onclick=async()=>{
+          try{await command(2,offset+1);show("finish");
+            status.textContent=`${option} sent; wait for confirmation.`}
+          catch(error){status.textContent=`Could not store value: ${error.message}`}
+        };
+        valueButtons.append(button);
+      });
+    }
+    begin.onclick=async()=>{
+      try{await command(0);active=true;index.disabled=true;begin.disabled=true;
+        cancel.hidden=false;show("items");
+        status.textContent="Full throttle active. Connect the selected ESC battery now."}
+      catch(error){status.textContent=`Could not begin: ${error.message}`}
+    };
+    document.querySelector("#continue").onclick=async()=>{
+      try{await command(3);show("items");status.textContent="Listening for another item."}
+      catch(error){status.textContent=`Could not continue: ${error.message}`}
+    };
+    document.querySelector("#exit").onclick=async()=>{
+      try{await command(4);active=false;show("");cancel.hidden=true;
+        index.disabled=false;begin.disabled=false;status.textContent="Programming exited."}
+      catch(error){status.textContent=`Could not exit: ${error.message}`}
+    };
+    cancel.onclick=async()=>{
+      try{await command(5)}catch(error){}
+      active=false;show("");cancel.hidden=true;index.disabled=false;begin.disabled=false;
+      status.textContent="Programming cancelled; minimum throttle is active.";
+    };
+    addEventListener("pagehide",()=>{if(active)navigator.sendBeacon(
+      "/api/esc-programming",new URLSearchParams({index:index.value,action:5,selection:0}))});
+  </script>
+</main></body></html>

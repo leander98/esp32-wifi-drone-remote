@@ -14,6 +14,7 @@
     .back{padding:10px 13px;border-radius:10px;background:#dce3eb}
     .item{display:block;padding:20px;border-radius:16px;background:#fff;
       box-shadow:0 8px 28px #18212f18}
+    .item+.item{margin-top:12px}
     .item b{display:block;font-size:1.1rem}
     .item span{display:block;margin-top:5px;color:#657184}
   </style>
@@ -22,7 +23,15 @@
   <header><a class="back" href="/settings">Back</a><h1>XW30A ESC settings</h1></header>
   <a class="item" href="/settings/esc/pwm-channels">
     <b>PWM-channel settings</b>
-    <span>Configure PWM outputs and manually control each ESC</span>
+    <span>Configure each ESC channel's GPIO and PWM signal range</span>
+  </a>
+  <a class="item" href="/settings/esc/manual">
+    <b>Manual ESC control</b>
+    <span>Test each motor with an individual throttle slider</span>
+  </a>
+  <a class="item" href="/settings/esc/programming">
+    <b>Programming</b>
+    <span>Configure brake, battery, cut-off, start mode, and timing</span>
   </a>
 </main></body>
 </html>

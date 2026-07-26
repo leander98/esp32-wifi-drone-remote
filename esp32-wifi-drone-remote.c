@@ -51,6 +51,7 @@ static void *s_imu_context;
 static esp32_wifi_drone_remote_esc_get_handler_t s_esc_get_handler;
 static esp32_wifi_drone_remote_esc_set_handler_t s_esc_set_handler;
 static esp32_wifi_drone_remote_esc_throttle_handler_t s_esc_throttle_handler;
+static esp32_wifi_drone_remote_esc_program_handler_t s_esc_program_handler;
 static void *s_esc_context;
 static char s_saved_station_ssid[33];
 static char s_saved_station_password[65];
@@ -74,6 +75,8 @@ extern const uint8_t esc_pwm_channel_settings_html_start[]
     asm("_binary_esc_pwm_channel_settings_html_start");
 extern const uint8_t esc_manual_html_start[]
     asm("_binary_esc_manual_html_start");
+extern const uint8_t esc_programming_html_start[]
+    asm("_binary_esc_programming_html_start");
 
 /**
  * @brief Advertise the controller through multicast DNS.
@@ -214,6 +217,16 @@ static esp_err_t esc_manual_page_handler(httpd_req_t *request)
     httpd_resp_set_hdr(request, "Cache-Control",
                        "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)esc_manual_html_start,
+                           HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the guided XW30A programming page. */
+static esp_err_t esc_programming_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(request, (const char *)esc_programming_html_start,
                            HTTPD_RESP_USE_STRLEN);
 }
 
@@ -544,6 +557,52 @@ static esp_err_t esc_throttle_post_handler(httpd_req_t *request)
     }
     esp_err_t err = s_esc_throttle_handler(
         (uint8_t)index, (float)throttle / 1000.0f, s_esc_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
+}
+
+/** @brief Dispatch one guided ESC programming step. */
+static esp_err_t esc_programming_post_handler(httpd_req_t *request)
+{
+    char body[64];
+    char index_text[4], action_text[4], selection_text[4];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid programming command");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+    if (httpd_query_key_value(body, "index", index_text,
+                              sizeof(index_text)) != ESP_OK ||
+        httpd_query_key_value(body, "action", action_text,
+                              sizeof(action_text)) != ESP_OK ||
+        httpd_query_key_value(body, "selection", selection_text,
+                              sizeof(selection_text)) != ESP_OK ||
+        s_esc_program_handler == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid programming command");
+    }
+    unsigned long index = strtoul(index_text, NULL, 10);
+    unsigned long action = strtoul(action_text, NULL, 10);
+    unsigned long selection = strtoul(selection_text, NULL, 10);
+    if (index >= ESP32_WIFI_DRONE_REMOTE_ESC_COUNT ||
+        action > ESP32_WIFI_ESC_PROGRAM_CANCEL || selection > UINT8_MAX) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Unsupported programming command");
+    }
+    esp_err_t err = s_esc_program_handler(
+        (uint8_t)index,
+        (esp32_wifi_drone_remote_esc_program_action_t)action,
+        (uint8_t)selection, s_esc_context);
     if (err != ESP_OK) {
         return httpd_resp_send_err(request,
                                    HTTPD_500_INTERNAL_SERVER_ERROR,
@@ -1195,12 +1254,21 @@ static esp_err_t start_webserver(void)
     }
 
     const httpd_uri_t esc_manual_page = {
-        .uri = "/settings/esc/pwm-channels/manual",
+        .uri = "/settings/esc/manual",
         .method = HTTP_GET,
         .handler = esc_manual_page_handler,
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &esc_manual_page);
+    }
+
+    const httpd_uri_t esc_programming_page = {
+        .uri = "/settings/esc/programming",
+        .method = HTTP_GET,
+        .handler = esc_programming_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_programming_page);
     }
 
     const httpd_uri_t wifi_config = {
@@ -1291,6 +1359,15 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &esc_throttle_post);
+    }
+
+    const httpd_uri_t esc_programming_post = {
+        .uri = "/api/esc-programming",
+        .method = HTTP_POST,
+        .handler = esc_programming_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_programming_post);
     }
 
     const httpd_uri_t ap_config_get = {
@@ -1498,6 +1575,7 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_esc_get_handler = effective_config.esc_get_handler;
     s_esc_set_handler = effective_config.esc_set_handler;
     s_esc_throttle_handler = effective_config.esc_throttle_handler;
+    s_esc_program_handler = effective_config.esc_program_handler;
     s_esc_context = effective_config.esc_context;
 
     s_wifi_events = xEventGroupCreate();
@@ -1592,6 +1670,7 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_esc_get_handler = NULL;
     s_esc_set_handler = NULL;
     s_esc_throttle_handler = NULL;
+    s_esc_program_handler = NULL;
     s_esc_context = NULL;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;
