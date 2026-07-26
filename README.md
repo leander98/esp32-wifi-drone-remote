@@ -84,6 +84,7 @@ The page sends JSON `POST` requests to these endpoints:
 | `/api/imu-config` | Reads or applies application-provided IMU settings |
 | `/api/esc-config` | Reads or applies one application-provided ESC configuration |
 | `/api/esc-throttle` | Applies manual normalized throttle to one ESC |
+| `/api/wifi-scan` | Scans for nearby Wi-Fi station networks |
 
 Stick request bodies have the form `{"x": 0.0, "y": 0.0}`, with both values
 normalized to the range -1 through 1.
@@ -138,10 +139,10 @@ range is also selectable independently. Applications configure
 `imu_get_handler`, `imu_set_handler`, and `imu_context`; the Wi-Fi component
 does not depend directly on a particular IMU driver.
 
-The XW30A settings submenu selects one of four ESC channels and configures its
-GPIO, PWM frequency, pulse range, and calibration-high duration. The separate
-manual-control page provides an armed throttle slider for each channel and a
-stop-all control. Applications connect these pages through `esc_get_handler`,
-`esc_set_handler`, `esc_throttle_handler`, and `esc_context`. Manual throttle
-values are expressed from 0.0 through 1.0 and are never stored by this
-component.
+The XW30A settings menu contains a PWM-channel submenu that selects one of four
+ESC channels and configures its GPIO, PWM frequency, pulse range, and
+calibration-high duration. The same submenu links to manual control, which
+provides an armed throttle slider for each channel and a stop-all control.
+Applications connect these pages through `esc_get_handler`, `esc_set_handler`,
+`esc_throttle_handler`, and `esc_context`. Manual throttle values are expressed
+from 0.0 through 1.0 and are never stored by this component.

@@ -5,5 +5,6 @@ idf_component_register(
     EMBED_TXTFILES "controller.html" "wifi-setup.html"
                    "settings.html" "wifi-ap-settings.html"
                    "imu-settings.html" "esc-settings.html"
+                   "esc-pwm-channel-settings.html"
                    "esc-manual.html"
 )

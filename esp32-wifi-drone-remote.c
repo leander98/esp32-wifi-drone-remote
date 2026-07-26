@@ -26,6 +26,8 @@ static const char *TAG = "wifi-drone-remote";
 static const EventBits_t WIFI_CONNECTED_BIT = BIT0;
 static const EventBits_t WIFI_FAILED_BIT = BIT1;
 static const char *NETWORK_HOSTNAME = "esp32drone";
+static const char *WIFI_CREDENTIALS_PARTITION = "wifi_creds";
+static const char *WIFI_NVS_NAMESPACE = "drone_remote";
 
 static EventGroupHandle_t s_wifi_events;
 static esp_event_handler_instance_t s_wifi_handler;
@@ -34,6 +36,7 @@ static esp_netif_t *s_netif;
 static httpd_handle_t s_server;
 static bool s_started;
 static bool s_mdns_started;
+static bool s_wifi_scan_in_progress;
 static wifi_mode_t s_wifi_mode = WIFI_MODE_NULL;
 static esp32_wifi_drone_remote_api_handler_t s_api_handler;
 static void *s_api_context;
@@ -67,6 +70,8 @@ extern const uint8_t imu_settings_html_start[]
     asm("_binary_imu_settings_html_start");
 extern const uint8_t esc_settings_html_start[]
     asm("_binary_esc_settings_html_start");
+extern const uint8_t esc_pwm_channel_settings_html_start[]
+    asm("_binary_esc_pwm_channel_settings_html_start");
 extern const uint8_t esc_manual_html_start[]
     asm("_binary_esc_manual_html_start");
 
@@ -110,7 +115,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     (void)arg;
     (void)event_data;
 
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START &&
+        !s_wifi_scan_in_progress) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT &&
                event_id == WIFI_EVENT_STA_DISCONNECTED) {
@@ -180,7 +186,7 @@ static esp_err_t imu_settings_page_handler(httpd_req_t *request)
                            HTTPD_RESP_USE_STRLEN);
 }
 
-/** @brief Serve the XW30A configuration page. */
+/** @brief Serve the XW30A settings menu. */
 static esp_err_t esc_settings_page_handler(httpd_req_t *request)
 {
     httpd_resp_set_type(request, "text/html");
@@ -188,6 +194,17 @@ static esp_err_t esc_settings_page_handler(httpd_req_t *request)
                        "no-store, no-cache, must-revalidate");
     return httpd_resp_send(request, (const char *)esc_settings_html_start,
                            HTTPD_RESP_USE_STRLEN);
+}
+
+/** @brief Serve the XW30A PWM-channel settings page. */
+static esp_err_t esc_pwm_channel_settings_page_handler(httpd_req_t *request)
+{
+    httpd_resp_set_type(request, "text/html");
+    httpd_resp_set_hdr(request, "Cache-Control",
+                       "no-store, no-cache, must-revalidate");
+    return httpd_resp_send(
+        request, (const char *)esc_pwm_channel_settings_html_start,
+        HTTPD_RESP_USE_STRLEN);
 }
 
 /** @brief Serve the manual XW30A throttle-control page. */
@@ -602,6 +619,156 @@ static void delayed_restart_task(void *context)
     esp_restart();
 }
 
+/** @brief Escape one Wi-Fi SSID for inclusion in a JSON string. */
+static bool json_escape_ssid(const uint8_t *ssid, char *escaped, size_t size)
+{
+    size_t output = 0U;
+    for (size_t input = 0U; ssid[input] != '\0'; ++input) {
+        uint8_t value = ssid[input];
+        if (value == '"' || value == '\\') {
+            if (output + 2U >= size) {
+                return false;
+            }
+            escaped[output++] = '\\';
+            escaped[output++] = (char)value;
+        } else if (value < 0x20U) {
+            if (output + 6U >= size) {
+                return false;
+            }
+            int written = snprintf(escaped + output, size - output,
+                                   "\\u%04x", value);
+            if (written != 6) {
+                return false;
+            }
+            output += 6U;
+        } else {
+            if (output + 1U >= size) {
+                return false;
+            }
+            escaped[output++] = (char)value;
+        }
+    }
+    escaped[output] = '\0';
+    return true;
+}
+
+/**
+ * @brief Scan for nearby station networks and return them as JSON.
+ *
+ * AP-only operation is temporarily changed to AP+station mode so the access
+ * point remains available while the station interface performs the scan.
+ */
+static esp_err_t wifi_scan_handler(httpd_req_t *request)
+{
+    wifi_mode_t original_mode;
+    esp_err_t err = esp_wifi_get_mode(&original_mode);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+
+    bool restore_ap_mode = original_mode == WIFI_MODE_AP;
+    if (restore_ap_mode) {
+        s_wifi_scan_in_progress = true;
+        err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    }
+
+    const wifi_scan_config_t scan_config = {
+        .show_hidden = false,
+        .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+    };
+    if (err == ESP_OK) {
+        err = esp_wifi_scan_start(&scan_config, true);
+    }
+
+    wifi_ap_record_t records[20];
+    uint16_t record_count = sizeof(records) / sizeof(records[0]);
+    if (err == ESP_OK) {
+        err = esp_wifi_scan_get_ap_records(&record_count, records);
+    }
+    if (restore_ap_mode) {
+        esp_err_t restore_err = esp_wifi_set_mode(WIFI_MODE_AP);
+        s_wifi_scan_in_progress = false;
+        if (err == ESP_OK) {
+            err = restore_err;
+        }
+    }
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "[", 1), TAG,
+                        "Could not start Wi-Fi scan response");
+
+    bool first = true;
+    for (uint16_t index = 0U; index < record_count; ++index) {
+        if (records[index].ssid[0] == '\0') {
+            continue;
+        }
+        bool duplicate = false;
+        for (uint16_t previous = 0U; previous < index; ++previous) {
+            if (strcmp((const char *)records[index].ssid,
+                       (const char *)records[previous].ssid) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) {
+            continue;
+        }
+
+        char escaped_ssid[193];
+        char item[256];
+        if (!json_escape_ssid(records[index].ssid, escaped_ssid,
+                              sizeof(escaped_ssid))) {
+            continue;
+        }
+        int length = snprintf(item, sizeof(item),
+                              "%s{\"ssid\":\"%s\",\"rssi\":%d}",
+                              first ? "" : ",", escaped_ssid,
+                              records[index].rssi);
+        if (length < 0 || (size_t)length >= sizeof(item)) {
+            continue;
+        }
+        ESP_RETURN_ON_ERROR(
+            httpd_resp_send_chunk(request, item, (size_t)length), TAG,
+            "Could not send Wi-Fi scan result");
+        first = false;
+    }
+    ESP_RETURN_ON_ERROR(httpd_resp_send_chunk(request, "]", 1), TAG,
+                        "Could not finish Wi-Fi scan response");
+    return httpd_resp_send_chunk(request, NULL, 0);
+}
+
+/**
+ * @brief Persist station credentials in their dedicated NVS partition.
+ */
+static esp_err_t save_station_credentials(const char *ssid,
+                                          const char *password)
+{
+    nvs_handle_t nvs = 0;
+    esp_err_t err = nvs_open_from_partition(
+        WIFI_CREDENTIALS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "sta_ssid", ssid);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(nvs, "sta_password", password);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs);
+    }
+    if (nvs != 0) {
+        nvs_close(nvs);
+    }
+    return err;
+}
+
 /**
  * @brief Store submitted station credentials and schedule a restart.
  *
@@ -648,20 +815,7 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
                                    "Invalid Wi-Fi credentials");
     }
 
-    nvs_handle_t nvs = 0;
-    esp_err_t err = nvs_open("drone_remote", NVS_READWRITE, &nvs);
-    if (err == ESP_OK) {
-        err = nvs_set_str(nvs, "sta_ssid", ssid);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_str(nvs, "sta_password", password);
-    }
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
-    }
-    if (nvs != 0) {
-        nvs_close(nvs);
-    }
+    esp_err_t err = save_station_credentials(ssid, password);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Could not save station credentials: %s",
                  esp_err_to_name(err));
@@ -827,15 +981,16 @@ static void apply_saved_network_config(
 {
     *effective = *config;
 
+    bool station_loaded = false;
     nvs_handle_t nvs = 0;
-    esp_err_t err = nvs_open("drone_remote", NVS_READONLY, &nvs);
-    if (err != ESP_OK) {
-        return;
-    }
+    esp_err_t err = nvs_open_from_partition(
+        WIFI_CREDENTIALS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs);
 
     size_t ssid_size = sizeof(s_saved_station_ssid);
     size_t password_size = sizeof(s_saved_station_password);
-    err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
+    if (err == ESP_OK) {
+        err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
+    }
     if (err == ESP_OK) {
         err = nvs_get_str(nvs, "sta_password", s_saved_station_password,
                           &password_size);
@@ -847,12 +1002,51 @@ static void apply_saved_network_config(
     if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
         effective->station_ssid = s_saved_station_ssid;
         effective->station_password = s_saved_station_password;
+        station_loaded = true;
         ESP_LOGI(TAG, "Using station credentials saved from the setup page");
     } else if (err != ESP_ERR_NVS_NOT_FOUND) {
         ESP_LOGW(TAG, "Ignoring invalid saved station credentials: %s",
                  esp_err_to_name(err));
     }
+    if (nvs != 0) {
+        nvs_close(nvs);
+        nvs = 0;
+    }
 
+    if (!station_loaded &&
+        nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
+        ssid_size = sizeof(s_saved_station_ssid);
+        password_size = sizeof(s_saved_station_password);
+        err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
+        if (err == ESP_OK) {
+            err = nvs_get_str(nvs, "sta_password",
+                              s_saved_station_password, &password_size);
+            if (err == ESP_ERR_NVS_NOT_FOUND) {
+                s_saved_station_password[0] = '\0';
+                err = ESP_OK;
+            }
+        }
+        nvs_close(nvs);
+        nvs = 0;
+        if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
+            effective->station_ssid = s_saved_station_ssid;
+            effective->station_password = s_saved_station_password;
+            station_loaded = true;
+            err = save_station_credentials(s_saved_station_ssid,
+                                           s_saved_station_password);
+            if (err == ESP_OK) {
+                ESP_LOGI(TAG, "Migrated station credentials to dedicated NVS");
+            } else {
+                ESP_LOGW(TAG, "Could not migrate station credentials: %s",
+                         esp_err_to_name(err));
+            }
+        }
+    }
+
+    err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs);
+    if (err != ESP_OK) {
+        return;
+    }
     size_t ap_ssid_size = sizeof(s_saved_ap_ssid);
     size_t ap_password_size = sizeof(s_saved_ap_password);
     if (nvs_get_str(nvs, "ap_ssid", s_saved_ap_ssid,
@@ -990,8 +1184,18 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &esc_settings_page);
     }
 
+    const httpd_uri_t esc_pwm_channel_settings_page = {
+        .uri = "/settings/esc/pwm-channels",
+        .method = HTTP_GET,
+        .handler = esc_pwm_channel_settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(
+            s_server, &esc_pwm_channel_settings_page);
+    }
+
     const httpd_uri_t esc_manual_page = {
-        .uri = "/settings/esc-manual",
+        .uri = "/settings/esc/pwm-channels/manual",
         .method = HTTP_GET,
         .handler = esc_manual_page_handler,
     };
@@ -1006,6 +1210,15 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &wifi_config);
+    }
+
+    const httpd_uri_t wifi_scan = {
+        .uri = "/api/wifi-scan",
+        .method = HTTP_GET,
+        .handler = wifi_scan_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &wifi_scan);
     }
 
     const httpd_uri_t status = {
@@ -1127,6 +1340,13 @@ static esp_err_t initialize_platform(void)
         err = nvs_flash_init();
     }
     if (err != ESP_OK) {
+        return err;
+    }
+
+    err = nvs_flash_init_partition(WIFI_CREDENTIALS_PARTITION);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Persistent Wi-Fi credential storage unavailable: %s",
+                 esp_err_to_name(err));
         return err;
     }
 

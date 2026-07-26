@@ -27,7 +27,7 @@
     h1 { margin: 0 0 8px; font-size: 1.55rem; }
     p { color: #566274; line-height: 1.45; }
     label { display: block; margin-top: 18px; font-weight: 700; }
-    input {
+    input, select {
       width: 100%;
       min-height: 48px;
       margin-top: 7px;
@@ -37,6 +37,11 @@
       font: inherit;
       font-size: 16px;
     }
+    .network-row { display: flex; gap: 8px; align-items: end; }
+    .network-row select { flex: 1; }
+    .refresh { flex: 0 0 auto; min-width: 48px; padding: 10px; background: #e3e8ef;
+      color: #18212f; font-size: 1.2rem; }
+    [hidden] { display: none; }
     button, a {
       display: inline-grid;
       place-items: center;
@@ -63,8 +68,16 @@
       after saving. If the connection fails, its own access point returns.
     </p>
     <form id="wifi-form">
-      <label for="ssid">Network name</label>
-      <input id="ssid" name="ssid" maxlength="32" autocomplete="off" required>
+      <label for="network">Available networks</label>
+      <div class="network-row">
+        <select id="network" required>
+          <option value="">Scanning for networks…</option>
+        </select>
+        <button class="refresh" id="refresh" type="button"
+                aria-label="Scan again" title="Scan again">↻</button>
+      </div>
+      <input id="ssid" maxlength="32" autocomplete="off"
+             placeholder="Network name" aria-label="Network name" hidden>
 
       <label for="password">Password</label>
       <input id="password" name="password" type="password" maxlength="64"
@@ -80,16 +93,67 @@
   <script>
     const form = document.querySelector("#wifi-form");
     const status = document.querySelector("#status");
+    const network = document.querySelector("#network");
+    const ssid = document.querySelector("#ssid");
+    const refresh = document.querySelector("#refresh");
+
+    function updateManualEntry() {
+      const manual = network.value === "__manual__";
+      ssid.hidden = !manual;
+      ssid.required = manual;
+      if (manual) ssid.focus();
+    }
+
+    async function scanNetworks() {
+      refresh.disabled = true;
+      network.disabled = true;
+      status.textContent = "Scanning for nearby networks…";
+      try {
+        const response = await fetch("/api/wifi-scan", { cache: "no-store" });
+        if (!response.ok) throw new Error(await response.text());
+        const networks = await response.json();
+        network.replaceChildren();
+        for (const entry of networks) {
+          const quality = entry.rssi >= -60 ? "strong" :
+            entry.rssi >= -75 ? "medium" : "weak";
+          network.add(new Option(`${entry.ssid} (${quality})`, entry.ssid));
+        }
+        network.add(new Option("Enter a network manually…", "__manual__"));
+        if (networks.length === 0) network.value = "__manual__";
+        status.textContent = networks.length === 0 ?
+          "No visible networks found. Enter the network name manually." : "";
+      } catch (error) {
+        network.replaceChildren(
+          new Option("Enter a network manually…", "__manual__"));
+        status.textContent = `Could not scan: ${error.message}`;
+      } finally {
+        network.disabled = false;
+        refresh.disabled = false;
+        updateManualEntry();
+      }
+    }
+
+    network.addEventListener("change", updateManualEntry);
+    refresh.addEventListener("click", scanNetworks);
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      const button = form.querySelector("button");
+      const button = form.querySelector('button[type="submit"]');
+      const selectedSsid = network.value === "__manual__" ?
+        ssid.value.trim() : network.value;
+      if (!selectedSsid) {
+        status.textContent = "Select a network or enter its name.";
+        return;
+      }
       button.disabled = true;
       status.textContent = "Saving configuration…";
       try {
         const response = await fetch("/api/wifi-config", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },
-          body: new URLSearchParams(new FormData(form)),
+          body: new URLSearchParams({
+            ssid: selectedSsid,
+            password: form.password.value,
+          }),
         });
         if (!response.ok) throw new Error(await response.text());
         status.textContent =
@@ -99,6 +163,7 @@
         button.disabled = false;
       }
     });
+    scanNetworks();
   </script>
 </body>
 </html>

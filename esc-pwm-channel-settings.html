@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>PWM-channel Settings</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#18212f}*{box-sizing:border-box}
+    body{margin:0;min-height:100dvh;padding:20px;background:#eef2f7}
+    main{width:min(100%,520px);margin:auto;padding:24px;border-radius:18px;
+      background:#fff;box-shadow:0 12px 40px #18212f22}
+    header{display:flex;align-items:center;gap:14px}h1{margin:0;font-size:1.4rem}
+    a{padding:10px 13px;border-radius:10px;background:#e3e8ef;color:inherit;
+      text-decoration:none}label{display:block;margin-top:17px;font-weight:700}
+    select,input{width:100%;min-height:48px;margin-top:7px;padding:9px 11px;
+      border:1px solid #aab3c0;border-radius:10px;background:#fff;font:16px system-ui}
+    button{width:100%;min-height:48px;margin-top:23px;border:0;border-radius:10px;
+      background:#e63946;color:#fff;font:inherit;font-weight:750}
+    #status{color:#657184;min-height:24px}.note{color:#657184}
+    .manual{display:block;margin-top:20px;padding:16px;border-radius:12px;
+      background:#eef2f7;font-weight:700}
+  </style>
+</head>
+<body><main>
+  <header><a href="/settings/esc">Back</a><h1>PWM-channel settings</h1></header>
+  <p class="note">Changes are stored persistently. The selected ESC is stopped while its PWM output is recreated.</p>
+  <form id="form">
+    <label for="index">ESC channel</label>
+    <select id="index" name="index">
+      <option value="0">ESC 1</option><option value="1">ESC 2</option>
+      <option value="2">ESC 3</option><option value="3">ESC 4</option>
+    </select>
+    <label for="gpio">Signal GPIO</label>
+    <select id="gpio" name="gpio"></select>
+    <label for="frequency">PWM frequency</label>
+    <select id="frequency" name="frequency">
+      <option value="50">50 Hz (standard)</option>
+      <option value="100">100 Hz</option><option value="200">200 Hz</option>
+      <option value="250">250 Hz</option><option value="400">400 Hz</option>
+    </select>
+    <label for="min_pulse">Minimum pulse width</label>
+    <select id="min_pulse" name="min_pulse"></select>
+    <label for="max_pulse">Maximum pulse width</label>
+    <select id="max_pulse" name="max_pulse"></select>
+    <label for="calibration_ms">Calibration high time</label>
+    <select id="calibration_ms" name="calibration_ms">
+      <option value="1000">1000 ms</option><option value="1500">1500 ms</option>
+      <option value="2000">2000 ms (standard)</option>
+      <option value="2500">2500 ms</option><option value="3000">3000 ms</option>
+      <option value="5000">5000 ms</option>
+    </select>
+    <button type="submit">Apply ESC settings</button>
+    <p id="status" role="status"></p>
+  </form>
+  <a class="manual" href="/settings/esc/pwm-channels/manual">Manual ESC control</a>
+  <script>
+    const form=document.querySelector("#form"),status=document.querySelector("#status");
+    for(const gpio of [1,2,3,4,5,6,7,10,11,12,13,14,15,16,17,18,19,20,21])
+      form.gpio.add(new Option(`GPIO ${gpio}`,gpio));
+    for(let pulse=800;pulse<=1200;pulse+=50)
+      form.min_pulse.add(new Option(`${pulse} µs`,pulse));
+    for(let pulse=1800;pulse<=2200;pulse+=50)
+      form.max_pulse.add(new Option(`${pulse} µs`,pulse));
+    async function load(){
+      status.textContent="Loading…";
+      const response=await fetch(`/api/esc-config?index=${form.index.value}`,{cache:"no-store"});
+      if(!response.ok)throw new Error(await response.text());
+      const value=await response.json();
+      for(const key of ["gpio","frequency","min_pulse","max_pulse","calibration_ms"])
+        form[key].value=value[key];
+      status.textContent="";
+    }
+    form.index.onchange=()=>load().catch(error=>status.textContent=`Could not load: ${error.message}`);
+    form.onsubmit=async event=>{
+      event.preventDefault();status.textContent="Applying…";
+      const response=await fetch("/api/esc-config",{method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams(new FormData(form))});
+      status.textContent=response.ok?"Settings saved.":`Could not apply: ${await response.text()}`;
+    };
+    load().catch(error=>status.textContent=`Could not load: ${error.message}`);
+  </script>
+</main></body></html>
