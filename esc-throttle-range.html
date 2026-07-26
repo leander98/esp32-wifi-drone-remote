@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>ESC Throttle Range Setting</title>
+  <style>
+    :root{font-family:system-ui,sans-serif;color:#18212f}*{box-sizing:border-box}
+    body{margin:0;min-height:100dvh;padding:20px;background:#eef2f7}
+    main{width:min(100%,540px);margin:auto;padding:24px;border-radius:18px;
+      background:#fff;box-shadow:0 12px 40px #18212f22}
+    header{display:flex;align-items:center;gap:14px}
+    h1{margin:0;font-size:1.35rem}h2{font-size:1.08rem;margin-top:22px}
+    a{padding:10px 13px;border-radius:10px;background:#e3e8ef;
+      color:inherit;text-decoration:none}
+    label{display:block;margin-top:18px;font-weight:750}
+    select,button{width:100%;min-height:48px;margin-top:8px;border-radius:10px;
+      font:16px system-ui}
+    select{padding:8px;border:1px solid #aab3c0;background:#fff}
+    button{border:0;background:#e63946;color:#fff;font-weight:750;cursor:pointer}
+    button.secondary{background:#536174}button:disabled{opacity:.5}
+    .warning{padding:13px;border-radius:10px;background:#ffe2e4;color:#8c2028;
+      font-weight:700}.step{padding:14px;border-left:4px solid #c7ced8;
+      background:#f5f7fa}.step.active{border-color:#e63946}
+    #status{min-height:24px;color:#536174;font-weight:650}
+  </style>
+</head>
+<body><main>
+  <header><a href="/settings/esc">Back</a><h1>Throttle Range Setting</h1></header>
+  <p class="warning">Remove all propellers. Disconnect battery power from
+    every ESC before starting. Only power the selected ESC during this
+    procedure.</p>
+  <label for="index">ESC channel</label>
+  <select id="index">
+    <option value="0">ESC 1</option><option value="1">ESC 2</option>
+    <option value="2">ESC 3</option><option value="3">ESC 4</option>
+  </select>
+
+  <h2>Manual sequence</h2>
+  <p class="step active" id="step1"><b>1.</b> Keep the ESC battery
+    disconnected, then press Start. Maximum throttle PWM will be applied.</p>
+  <p class="step" id="step2"><b>2.</b> Connect the ESC battery. Wait for
+    self-test tone “123” and the battery-cell beeps. Then press Latch range.
+    The controller waits two seconds for the two maximum-latched beeps and
+    changes the signal to minimum within the manual's five-second window.</p>
+  <p class="step" id="step3"><b>3.</b> Wait approximately one second for the
+    long beep confirming that minimum throttle was stored, then disconnect
+    ESC battery power.</p>
+
+  <button id="advance">Start at maximum throttle</button>
+  <button id="cancel" class="secondary" disabled>Cancel and set minimum</button>
+  <p id="status" role="status">Ready. ESC battery must be disconnected.</p>
+  <script>
+    const index=document.querySelector("#index");
+    const advance=document.querySelector("#advance");
+    const cancel=document.querySelector("#cancel");
+    const status=document.querySelector("#status");
+    const steps=[document.querySelector("#step1"),
+      document.querySelector("#step2"),document.querySelector("#step3")];
+    let stage=0;
+    async function command(action){
+      const response=await fetch("/api/esc-throttle-range",{
+        method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams({index:index.value,action}),
+      });
+      if(!response.ok)throw new Error(await response.text());
+    }
+    function showStage(value){
+      stage=value;
+      steps.forEach((step,i)=>step.classList.toggle("active",i===stage));
+      index.disabled=stage!==0;
+      cancel.disabled=stage===0||stage===2;
+      advance.disabled=stage===2;
+      advance.textContent=stage===0 ? "Start at maximum throttle" :
+        stage===1 ? "Latch range and set minimum" : "Range setting complete";
+    }
+    advance.onclick=async()=>{
+      advance.disabled=true;
+      try{
+        if(stage===0){
+          await command(0);
+          showStage(1);
+          status.textContent="Maximum PWM active. Connect ESC battery and listen for the self-test and cell-count tones.";
+        }else if(stage===1){
+          status.textContent="Holding maximum for two seconds, then selecting minimum…";
+          await command(1);
+          showStage(2);
+          status.textContent="Minimum PWM active. Wait for the long confirmation beep, then disconnect ESC battery.";
+        }
+      }catch(error){
+        advance.disabled=false;
+        status.textContent=`Could not continue: ${error.message}`;
+      }
+    };
+    cancel.onclick=async()=>{
+      cancel.disabled=true;
+      try{
+        await command(2);
+        showStage(0);
+        status.textContent="Cancelled. Minimum PWM restored.";
+      }catch(error){
+        cancel.disabled=false;
+        status.textContent=`Could not cancel: ${error.message}`;
+      }
+    };
+    addEventListener("pagehide",()=>{
+      if(stage===1)navigator.sendBeacon("/api/esc-throttle-range",
+        new URLSearchParams({index:index.value,action:2}));
+    });
+    showStage(0);
+  </script>
+</main></body></html>

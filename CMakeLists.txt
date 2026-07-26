@@ -9,4 +9,5 @@ idf_component_register(
                    "imu-settings.html" "pid-settings.html" "esc-settings.html"
                    "esc-pwm-channel-settings.html"
                    "esc-manual.html" "esc-programming.html"
+                   "esc-throttle-range.html"
 )

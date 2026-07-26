@@ -26,6 +26,8 @@ extern const uint8_t esc_manual_html_start[]
     asm("_binary_esc_manual_html_start");
 extern const uint8_t esc_programming_html_start[]
     asm("_binary_esc_programming_html_start");
+extern const uint8_t esc_throttle_range_html_start[]
+    asm("_binary_esc_throttle_range_html_start");
 
 /** Cache policy used by every embedded application page. */
 static const char *PAGE_CACHE_CONTROL =
@@ -104,4 +106,10 @@ esp_err_t esc_manual_page_handler(httpd_req_t *request)
 esp_err_t esc_programming_page_handler(httpd_req_t *request)
 {
     return send_html(request, esc_programming_html_start);
+}
+
+/** @brief Serve the guided XW30A throttle-range setting page. */
+esp_err_t esc_throttle_range_page_handler(httpd_req_t *request)
+{
+    return send_html(request, esc_throttle_range_html_start);
 }

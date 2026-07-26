@@ -100,6 +100,9 @@ static esp32_wifi_drone_remote_esc_set_handler_t s_esc_set_handler;
 static esp32_wifi_drone_remote_esc_throttle_handler_t s_esc_throttle_handler;
 /** Application callback executing an ESC programming step. */
 static esp32_wifi_drone_remote_esc_program_handler_t s_esc_program_handler;
+/** Application callback executing ESC throttle-range setting steps. */
+static esp32_wifi_drone_remote_esc_throttle_range_handler_t
+    s_esc_throttle_range_handler;
 /** Shared application context for all ESC callbacks. */
 static void *s_esc_context;
 /** Runtime configuration after applying all persisted overrides. */
@@ -687,6 +690,49 @@ static esp_err_t esc_programming_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
+/** @brief Dispatch one guided ESC throttle-range setting step. */
+static esp_err_t esc_throttle_range_post_handler(httpd_req_t *request)
+{
+    char body[48];
+    char index_text[4], action_text[4];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid throttle-range command");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+    if (httpd_query_key_value(body, "index", index_text,
+                              sizeof(index_text)) != ESP_OK ||
+        httpd_query_key_value(body, "action", action_text,
+                              sizeof(action_text)) != ESP_OK ||
+        s_esc_throttle_range_handler == NULL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid throttle-range command");
+    }
+    unsigned long index = strtoul(index_text, NULL, 10);
+    unsigned long action = strtoul(action_text, NULL, 10);
+    if (index >= ESP32_WIFI_DRONE_REMOTE_ESC_COUNT ||
+        action > ESP32_WIFI_ESC_THROTTLE_RANGE_CANCEL) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Unsupported throttle-range command");
+    }
+    esp_err_t err = s_esc_throttle_range_handler(
+        (uint8_t)index,
+        (esp32_wifi_drone_remote_esc_throttle_range_action_t)action,
+        s_esc_context);
+    if (err != ESP_OK) {
+        return httpd_resp_send_err(request,
+                                   HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
+}
+
 /**
  * @brief Convert a hexadecimal URL-encoding digit to its numeric value.
  *
@@ -1146,7 +1192,7 @@ static esp_err_t start_webserver(void)
         "/api/sound", "/api/left-stick", "/api/right-stick",
     };
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-    config.max_uri_handlers = 32;
+    config.max_uri_handlers = 36;
 
     esp_err_t err = httpd_start(&s_server, &config);
     if (err != ESP_OK) {
@@ -1238,6 +1284,15 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &esc_programming_page);
+    }
+
+    const httpd_uri_t esc_throttle_range_page = {
+        .uri = "/settings/esc/throttle-range",
+        .method = HTTP_GET,
+        .handler = esc_throttle_range_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_throttle_range_page);
     }
 
     const httpd_uri_t wifi_config = {
@@ -1355,6 +1410,15 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &esc_programming_post);
+    }
+
+    const httpd_uri_t esc_throttle_range_post = {
+        .uri = "/api/esc-throttle-range",
+        .method = HTTP_POST,
+        .handler = esc_throttle_range_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &esc_throttle_range_post);
     }
 
     const httpd_uri_t ap_config_get = {
@@ -1648,6 +1712,8 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_esc_set_handler = effective_config.esc_set_handler;
     s_esc_throttle_handler = effective_config.esc_throttle_handler;
     s_esc_program_handler = effective_config.esc_program_handler;
+    s_esc_throttle_range_handler =
+        effective_config.esc_throttle_range_handler;
     s_esc_context = effective_config.esc_context;
 
     s_wifi_events = xEventGroupCreate();
@@ -1760,6 +1826,7 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_esc_set_handler = NULL;
     s_esc_throttle_handler = NULL;
     s_esc_program_handler = NULL;
+    s_esc_throttle_range_handler = NULL;
     s_esc_context = NULL;
     s_wifi_mode = WIFI_MODE_NULL;
     return ESP_OK;

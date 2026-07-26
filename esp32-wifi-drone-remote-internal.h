@@ -27,3 +27,4 @@ esp_err_t esc_settings_page_handler(httpd_req_t *request);
 esp_err_t esc_pwm_channel_settings_page_handler(httpd_req_t *request);
 esp_err_t esc_manual_page_handler(httpd_req_t *request);
 esp_err_t esc_programming_page_handler(httpd_req_t *request);
+esp_err_t esc_throttle_range_page_handler(httpd_req_t *request);

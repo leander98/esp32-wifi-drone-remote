@@ -171,6 +171,22 @@ typedef esp_err_t (*esp32_wifi_drone_remote_esc_program_handler_t)(
     uint8_t selection,
     void *context);
 
+/** @brief Actions in the manual's throttle-range setting procedure. */
+typedef enum {
+    /** Output maximum throttle before the user connects ESC power. */
+    ESP32_WIFI_ESC_THROTTLE_RANGE_BEGIN = 0,
+    /** Wait two seconds, output minimum, and let the ESC store both endpoints. */
+    ESP32_WIFI_ESC_THROTTLE_RANGE_LATCH_MINIMUM,
+    /** Abort the procedure and restore minimum throttle. */
+    ESP32_WIFI_ESC_THROTTLE_RANGE_CANCEL,
+} esp32_wifi_drone_remote_esc_throttle_range_action_t;
+
+/** @brief Execute one step of ESC throttle-range setting. */
+typedef esp_err_t (*esp32_wifi_drone_remote_esc_throttle_range_handler_t)(
+    uint8_t index,
+    esp32_wifi_drone_remote_esc_throttle_range_action_t action,
+    void *context);
+
 /**
  * @brief Runtime configuration for the Wi-Fi drone remote.
  */
@@ -223,6 +239,9 @@ typedef struct {
     esp32_wifi_drone_remote_esc_throttle_handler_t esc_throttle_handler;
     /** Optional callback executing guided ESC programming commands. */
     esp32_wifi_drone_remote_esc_program_handler_t esc_program_handler;
+    /** Optional callback executing throttle-range setting commands. */
+    esp32_wifi_drone_remote_esc_throttle_range_handler_t
+        esc_throttle_range_handler;
     /** Application value passed to all ESC callbacks. */
     void *esc_context;
 } esp32_wifi_drone_remote_config_t;
@@ -256,6 +275,7 @@ typedef struct {
         .esc_set_handler = NULL,                                        \
         .esc_throttle_handler = NULL,                                   \
         .esc_program_handler = NULL,                                    \
+        .esc_throttle_range_handler = NULL,                             \
         .esc_context = NULL,                                            \
     }
 
