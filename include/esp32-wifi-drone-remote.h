@@ -91,6 +91,29 @@ typedef esp_err_t (*esp32_wifi_drone_remote_imu_set_handler_t)(
     const esp32_wifi_drone_remote_imu_config_t *config,
     void *context);
 
+/** @brief Roll, pitch, and yaw-rate PID gains exposed by the web UI. */
+typedef struct {
+    float roll_kp;
+    float roll_ki;
+    float roll_kd;
+    float pitch_kp;
+    float pitch_ki;
+    float pitch_kd;
+    float yaw_kp;
+    float yaw_ki;
+    float yaw_kd;
+} esp32_wifi_drone_remote_pid_config_t;
+
+/** @brief Return the active flight-controller PID gains. */
+typedef esp_err_t (*esp32_wifi_drone_remote_pid_get_handler_t)(
+    esp32_wifi_drone_remote_pid_config_t *config,
+    void *context);
+
+/** @brief Validate, apply, and persist flight-controller PID gains. */
+typedef esp_err_t (*esp32_wifi_drone_remote_pid_set_handler_t)(
+    const esp32_wifi_drone_remote_pid_config_t *config,
+    void *context);
+
 /** Number of independently configurable ESC channels exposed by the UI. */
 #define ESP32_WIFI_DRONE_REMOTE_ESC_COUNT 4U
 
@@ -181,6 +204,12 @@ typedef struct {
     esp32_wifi_drone_remote_imu_set_handler_t imu_set_handler;
     /** Application value passed to both IMU settings callbacks. */
     void *imu_context;
+    /** Optional callback returning active flight-controller PID gains. */
+    esp32_wifi_drone_remote_pid_get_handler_t pid_get_handler;
+    /** Optional callback applying flight-controller PID gains. */
+    esp32_wifi_drone_remote_pid_set_handler_t pid_set_handler;
+    /** Application value passed to both PID settings callbacks. */
+    void *pid_context;
     /** Optional callback returning one ESC channel's settings. */
     esp32_wifi_drone_remote_esc_get_handler_t esc_get_handler;
     /** Optional callback applying one ESC channel's settings. */
@@ -215,6 +244,9 @@ typedef struct {
         .imu_get_handler = NULL,                                        \
         .imu_set_handler = NULL,                                        \
         .imu_context = NULL,                                            \
+        .pid_get_handler = NULL,                                        \
+        .pid_set_handler = NULL,                                        \
+        .pid_context = NULL,                                            \
         .esc_get_handler = NULL,                                        \
         .esc_set_handler = NULL,                                        \
         .esc_throttle_handler = NULL,                                   \

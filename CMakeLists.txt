@@ -6,7 +6,7 @@ idf_component_register(
     PRIV_REQUIRES esp_event esp_http_server esp_netif esp_wifi mdns nvs_flash
     EMBED_TXTFILES "controller.html" "wifi-setup.html"
                    "settings.html" "wifi-ap-settings.html"
-                   "imu-settings.html" "esc-settings.html"
+                   "imu-settings.html" "pid-settings.html" "esc-settings.html"
                    "esc-pwm-channel-settings.html"
                    "esc-manual.html" "esc-programming.html"
 )

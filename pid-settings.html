@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#18212f">
+  <title>PID Tuning</title>
+  <style>
+    :root { font-family:system-ui,sans-serif; color:#18212f; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100dvh; padding:20px; background:#eef2f7; }
+    main { width:min(100%,560px); margin:auto; padding:24px; border-radius:18px;
+      background:white; box-shadow:0 12px 40px #18212f22; }
+    header { display:flex; align-items:center; gap:14px; margin-bottom:18px; }
+    h1 { margin:0; font-size:1.4rem; }
+    h2 { margin:22px 0 8px; font-size:1.1rem; }
+    a { padding:10px 13px; border-radius:10px; background:#e3e8ef;
+      color:inherit; text-decoration:none; }
+    .gains { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+    label { font-weight:700; }
+    input { width:100%; min-height:46px; margin-top:6px; padding:9px;
+      border:1px solid #aab3c0; border-radius:10px; font:16px system-ui; }
+    button { width:100%; min-height:48px; margin-top:24px; border:0;
+      border-radius:10px; background:#e63946; color:white; font:inherit;
+      font-weight:750; cursor:pointer; }
+    .warning { color:#9c2f35; font-weight:650; }
+    #status { min-height:24px; color:#657184; }
+  </style>
+</head>
+<body><main>
+  <header><a href="/settings">Back</a><h1>PID tuning</h1></header>
+  <p class="warning">Disarm the motors before changing gains. Test changes
+    with propellers removed.</p>
+  <form id="pid-form">
+    <h2>Roll attitude</h2>
+    <div class="gains">
+      <label>Kp<input name="roll_kp" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Ki<input name="roll_ki" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Kd<input name="roll_kd" type="number" min="0" max="10"
+        step="0.0001" required></label>
+    </div>
+    <h2>Pitch attitude</h2>
+    <div class="gains">
+      <label>Kp<input name="pitch_kp" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Ki<input name="pitch_ki" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Kd<input name="pitch_kd" type="number" min="0" max="10"
+        step="0.0001" required></label>
+    </div>
+    <h2>Yaw rate</h2>
+    <div class="gains">
+      <label>Kp<input name="yaw_kp" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Ki<input name="yaw_ki" type="number" min="0" max="10"
+        step="0.0001" required></label>
+      <label>Kd<input name="yaw_kd" type="number" min="0" max="10"
+        step="0.0001" required></label>
+    </div>
+    <button type="submit">Apply PID gains</button>
+    <p id="status" role="status"></p>
+  </form>
+  <script>
+    const form=document.querySelector("#pid-form");
+    const status=document.querySelector("#status");
+    async function load() {
+      const response=await fetch("/api/pid-config",{cache:"no-store"});
+      if (!response.ok) throw new Error(await response.text());
+      const values=await response.json();
+      Object.entries(values).forEach(([key,value]) => form[key].value=value);
+    }
+    load().catch(error => status.textContent=`Could not load: ${error.message}`);
+    form.onsubmit=async event => {
+      event.preventDefault();
+      status.textContent="Applying…";
+      const response=await fetch("/api/pid-config",{
+        method:"POST",
+        headers:{"Content-Type":"application/x-www-form-urlencoded"},
+        body:new URLSearchParams(new FormData(form)),
+      });
+      status.textContent=response.ok ? "PID gains applied and saved." :
+        `Could not apply: ${await response.text()}`;
+    };
+  </script>
+</main></body></html>

@@ -9,6 +9,7 @@
  * the default NVS partition.
  */
 #include <stdbool.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -87,6 +88,10 @@ static esp32_wifi_drone_remote_imu_get_handler_t s_imu_get_handler;
 static esp32_wifi_drone_remote_imu_set_handler_t s_imu_set_handler;
 /** Shared application context for the IMU callbacks. */
 static void *s_imu_context;
+/** Application callbacks and context for flight-controller PID tuning. */
+static esp32_wifi_drone_remote_pid_get_handler_t s_pid_get_handler;
+static esp32_wifi_drone_remote_pid_set_handler_t s_pid_set_handler;
+static void *s_pid_context;
 /** Application callback reading one ESC channel configuration. */
 static esp32_wifi_drone_remote_esc_get_handler_t s_esc_get_handler;
 /** Application callback applying one ESC channel configuration. */
@@ -355,6 +360,93 @@ static esp_err_t imu_config_post_handler(httpd_req_t *request)
     if (err != ESP_OK) {
         return httpd_resp_send_err(request,
                                    HTTPD_500_INTERNAL_SERVER_ERROR,
+                                   esp_err_to_name(err));
+    }
+    httpd_resp_set_status(request, "204 No Content");
+    return httpd_resp_send(request, NULL, 0);
+}
+
+/** @brief Return current application-provided flight PID gains. */
+static esp_err_t pid_config_get_handler(httpd_req_t *request)
+{
+    if (s_pid_get_handler == NULL) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request,
+                                  "PID settings API is not configured");
+    }
+    esp32_wifi_drone_remote_pid_config_t config;
+    esp_err_t err = s_pid_get_handler(&config, s_pid_context);
+    if (err != ESP_OK) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request, esp_err_to_name(err));
+    }
+    char response[320];
+    int length = snprintf(response, sizeof(response),
+        "{\"roll_kp\":%.6g,\"roll_ki\":%.6g,\"roll_kd\":%.6g,"
+        "\"pitch_kp\":%.6g,\"pitch_ki\":%.6g,\"pitch_kd\":%.6g,"
+        "\"yaw_kp\":%.6g,\"yaw_ki\":%.6g,\"yaw_kd\":%.6g}",
+        config.roll_kp, config.roll_ki, config.roll_kd,
+        config.pitch_kp, config.pitch_ki, config.pitch_kd,
+        config.yaw_kp, config.yaw_ki, config.yaw_kd);
+    httpd_resp_set_type(request, "application/json");
+    httpd_resp_set_hdr(request, "Cache-Control", "no-store");
+    return httpd_resp_send(request, response, length);
+}
+
+/** @brief Validate and dispatch submitted flight PID gains. */
+static esp_err_t pid_config_post_handler(httpd_req_t *request)
+{
+    char body[384];
+    if (request->content_len == 0U ||
+        request->content_len >= sizeof(body)) {
+        return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                   "Invalid PID settings");
+    }
+    int received = httpd_req_recv(request, body, request->content_len);
+    if (received != (int)request->content_len) {
+        return ESP_FAIL;
+    }
+    body[received] = '\0';
+
+    esp32_wifi_drone_remote_pid_config_t config;
+    static const char *names[] = {
+        "roll_kp", "roll_ki", "roll_kd",
+        "pitch_kp", "pitch_ki", "pitch_kd",
+        "yaw_kp", "yaw_ki", "yaw_kd",
+    };
+    float *values[] = {
+        &config.roll_kp, &config.roll_ki, &config.roll_kd,
+        &config.pitch_kp, &config.pitch_ki, &config.pitch_kd,
+        &config.yaw_kp, &config.yaw_ki, &config.yaw_kd,
+    };
+    for (size_t index = 0; index < 9U; ++index) {
+        char text[24];
+        char *end = NULL;
+        if (httpd_query_key_value(body, names[index], text,
+                                  sizeof(text)) != ESP_OK) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                       "Missing PID gain");
+        }
+        *values[index] = strtof(text, &end);
+        if (end == text || *end != '\0' || !isfinite(*values[index]) ||
+            *values[index] < 0.0f || *values[index] > 10.0f) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                       "PID gains must be between 0 and 10");
+        }
+    }
+    if (s_pid_set_handler == NULL) {
+        httpd_resp_set_status(request, "503 Service Unavailable");
+        return httpd_resp_sendstr(request,
+                                  "PID settings API is not configured");
+    }
+    esp_err_t err = s_pid_set_handler(&config, s_pid_context);
+    if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_STATE) {
+            httpd_resp_set_status(request, "409 Conflict");
+            return httpd_resp_sendstr(request,
+                                      "Disarm motors before changing PID gains");
+        }
+        return httpd_resp_send_err(request, HTTPD_500_INTERNAL_SERVER_ERROR,
                                    esp_err_to_name(err));
     }
     httpd_resp_set_status(request, "204 No Content");
@@ -1076,6 +1168,15 @@ static esp_err_t start_webserver(void)
         err = httpd_register_uri_handler(s_server, &imu_settings_page);
     }
 
+    const httpd_uri_t pid_settings_page = {
+        .uri = "/settings/pid",
+        .method = HTTP_GET,
+        .handler = pid_settings_page_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &pid_settings_page);
+    }
+
     const httpd_uri_t esc_settings_page = {
         .uri = "/settings/esc",
         .method = HTTP_GET,
@@ -1174,6 +1275,24 @@ static esp_err_t start_webserver(void)
     };
     if (err == ESP_OK) {
         err = httpd_register_uri_handler(s_server, &imu_config_post);
+    }
+
+    const httpd_uri_t pid_config_get = {
+        .uri = "/api/pid-config",
+        .method = HTTP_GET,
+        .handler = pid_config_get_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &pid_config_get);
+    }
+
+    const httpd_uri_t pid_config_post = {
+        .uri = "/api/pid-config",
+        .method = HTTP_POST,
+        .handler = pid_config_post_handler,
+    };
+    if (err == ESP_OK) {
+        err = httpd_register_uri_handler(s_server, &pid_config_post);
     }
 
     const httpd_uri_t esc_config_get = {
@@ -1496,6 +1615,9 @@ esp_err_t esp32_wifi_drone_remote_start(
     s_imu_get_handler = effective_config.imu_get_handler;
     s_imu_set_handler = effective_config.imu_set_handler;
     s_imu_context = effective_config.imu_context;
+    s_pid_get_handler = effective_config.pid_get_handler;
+    s_pid_set_handler = effective_config.pid_set_handler;
+    s_pid_context = effective_config.pid_context;
     s_esc_get_handler = effective_config.esc_get_handler;
     s_esc_set_handler = effective_config.esc_set_handler;
     s_esc_throttle_handler = effective_config.esc_throttle_handler;
@@ -1605,6 +1727,9 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
     s_imu_get_handler = NULL;
     s_imu_set_handler = NULL;
     s_imu_context = NULL;
+    s_pid_get_handler = NULL;
+    s_pid_set_handler = NULL;
+    s_pid_context = NULL;
     s_esc_get_handler = NULL;
     s_esc_set_handler = NULL;
     s_esc_throttle_handler = NULL;

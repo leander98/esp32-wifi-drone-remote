@@ -22,6 +22,7 @@ esp_err_t wifi_setup_page_handler(httpd_req_t *request);
 esp_err_t settings_page_handler(httpd_req_t *request);
 esp_err_t ap_settings_page_handler(httpd_req_t *request);
 esp_err_t imu_settings_page_handler(httpd_req_t *request);
+esp_err_t pid_settings_page_handler(httpd_req_t *request);
 esp_err_t esc_settings_page_handler(httpd_req_t *request);
 esp_err_t esc_pwm_channel_settings_page_handler(httpd_req_t *request);
 esp_err_t esc_manual_page_handler(httpd_req_t *request);

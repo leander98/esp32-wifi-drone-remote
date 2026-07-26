@@ -16,6 +16,8 @@ extern const uint8_t wifi_ap_settings_html_start[]
     asm("_binary_wifi_ap_settings_html_start");
 extern const uint8_t imu_settings_html_start[]
     asm("_binary_imu_settings_html_start");
+extern const uint8_t pid_settings_html_start[]
+    asm("_binary_pid_settings_html_start");
 extern const uint8_t esc_settings_html_start[]
     asm("_binary_esc_settings_html_start");
 extern const uint8_t esc_pwm_channel_settings_html_start[]
@@ -72,6 +74,12 @@ esp_err_t ap_settings_page_handler(httpd_req_t *request)
 esp_err_t imu_settings_page_handler(httpd_req_t *request)
 {
     return send_html(request, imu_settings_html_start);
+}
+
+/** @brief Serve the flight-controller PID tuning page. */
+esp_err_t pid_settings_page_handler(httpd_req_t *request)
+{
+    return send_html(request, pid_settings_html_start);
 }
 
 /** @brief Serve the XW30A settings menu. */
