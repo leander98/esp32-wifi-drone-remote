@@ -88,6 +88,11 @@
       cursor: pointer;
     }
     button.secondary { background: #3b4c63; }
+    #arm.arm-disarmed { background: #218739; }
+    #arm.arm-armed {
+      background: #d21f2b;
+      box-shadow: 0 0 0 3px #ffb3b8;
+    }
     .controls {
       display: grid;
       grid-template-columns: 1fr minmax(180px, .55fr) 1fr;
@@ -222,6 +227,8 @@
     </section>
     <section class="center">
       <div class="toolbar">
+        <button id="arm" class="arm-disarmed"
+                aria-pressed="false">Arm motors</button>
         <button data-api="turn-lock">Turn lock</button>
         <button id="brightness" class="secondary"
                 data-api="brightness">Brightness</button>
@@ -266,6 +273,9 @@
     let statusTimer;
     let telemetryTimer;
     let telemetryEnabled = false;
+    let flightArmed = false;
+    let flightHeartbeatTimer;
+    let resetThrottleControl = async () => {};
     let roll = 0;
     let pitch = 0;
     let yaw = 0;
@@ -307,6 +317,51 @@
     document.querySelector("#settings").onclick = () => {
       window.location.href = "/settings";
     };
+    const armButton = document.querySelector("#arm");
+
+    function displayArmingState() {
+      armButton.textContent = flightArmed ? "Disarm motors" : "Arm motors";
+      armButton.classList.toggle("arm-armed", flightArmed);
+      armButton.classList.toggle("arm-disarmed", !flightArmed);
+      armButton.setAttribute("aria-pressed", String(flightArmed));
+    }
+
+    armButton.onclick = async () => {
+      const requestedState = !flightArmed;
+      armButton.disabled = true;
+      try {
+        if (requestedState) await resetThrottleControl();
+        const response = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ armed: requestedState }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        flightArmed = requestedState;
+        displayArmingState();
+        clearInterval(flightHeartbeatTimer);
+        if (flightArmed) {
+          flightHeartbeatTimer = setInterval(() => {
+            fetch("/api/settings", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ heartbeat: true }),
+            }).catch(() => {});
+          }, 250);
+        }
+        statusEl.textContent = flightArmed ? "Motors armed" : "Motors disarmed";
+      } catch (error) {
+        statusEl.textContent = `Could not change arming state: ${error.message}`;
+      } finally {
+        armButton.disabled = false;
+      }
+    };
+    displayArmingState();
+    addEventListener("pagehide", () => {
+      if (flightArmed) navigator.sendBeacon(
+        "/api/settings", new Blob(['{"armed":false}'],
+          { type: "application/json" }));
+    });
 
     async function lockLandscape() {
       if (!screen.orientation?.lock) return false;
@@ -579,8 +634,17 @@
     document.querySelectorAll("[data-stick]").forEach((stick) => {
       let active = false;
       let lastSentAt = 0;
+      let currentX = 0;
+      let currentY = stick.dataset.stick === "left" ? -1 : 0;
       const knob = stick.querySelector(".knob");
       const name = `${stick.dataset.stick}-stick`;
+
+      function render() {
+        const bounds = stick.getBoundingClientRect();
+        knob.style.transform =
+          `translate(calc(-50% + ${currentX * bounds.width * .32}px), `
+          + `calc(-50% + ${-currentY * bounds.height * .32}px))`;
+      }
 
       function move(event) {
         if (!active) return;
@@ -594,9 +658,9 @@
           x /= magnitude;
           y /= magnitude;
         }
-        knob.style.transform =
-          `translate(calc(-50% + ${x * bounds.width * .32}px), `
-          + `calc(-50% + ${-y * bounds.height * .32}px))`;
+        currentX = x;
+        currentY = y;
+        render();
         const now = performance.now();
         if (now - lastSentAt >= 50) {
           lastSentAt = now;
@@ -613,9 +677,26 @@
       stick.onpointerup = stick.onpointercancel = () => {
         active = false;
         lastSentAt = 0;
-        knob.style.transform = "translate(-50%, -50%)";
-        send(name, { x: 0, y: 0 });
+        currentX = 0;
+        if (stick.dataset.stick !== "left") currentY = 0;
+        render();
+        send(name, { x: currentX, y: currentY });
       };
+
+      if (stick.dataset.stick === "left") {
+        resetThrottleControl = async () => {
+          currentX = 0;
+          currentY = -1;
+          render();
+          const response = await fetch("/api/left-stick", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ x: 0, y: -1 }),
+          });
+          if (!response.ok) throw new Error(await response.text());
+        };
+      }
+      render();
     });
   </script>
 </body>
