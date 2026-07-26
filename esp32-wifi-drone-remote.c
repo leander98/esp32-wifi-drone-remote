@@ -1,3 +1,13 @@
+/**
+ * @file esp32-wifi-drone-remote.c
+ * @brief Wi-Fi transport, HTTP API, and embedded web UI implementation.
+ *
+ * @details This component starts the ESP32 in station or access-point mode,
+ * publishes the controller through mDNS, serves the browser interface, and
+ * translates HTTP requests into application callbacks. Station credentials
+ * are stored in a dedicated NVS partition, while access-point preferences use
+ * the default NVS partition.
+ */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,62 +31,74 @@
 #include <lwip/sockets.h>
 
 #include "esp32-wifi-drone-remote.h"
+#include "esp32-wifi-drone-remote-internal.h"
 
+/** Logging tag used by this component. */
 static const char *TAG = "wifi-drone-remote";
+/** Event bit set after the station receives an IP address. */
 static const EventBits_t WIFI_CONNECTED_BIT = BIT0;
+/** Event bit set after a station connection attempt fails. */
 static const EventBits_t WIFI_FAILED_BIT = BIT1;
+/** Hostname advertised through DHCP and multicast DNS. */
 static const char *NETWORK_HOSTNAME = "esp32drone";
+/** Dedicated NVS partition containing persistent station credentials. */
 static const char *WIFI_CREDENTIALS_PARTITION = "wifi_creds";
-static const char *WIFI_NVS_NAMESPACE = "drone_remote";
-
+/** Delay between station reconnection scans while fallback AP mode is active. */
+static const uint32_t WIFI_RECONNECT_INTERVAL_MS = 15000U;
+/** Event group used to synchronize station startup with Wi-Fi callbacks. */
 static EventGroupHandle_t s_wifi_events;
+/** Registered instance of the Wi-Fi event callback. */
 static esp_event_handler_instance_t s_wifi_handler;
+/** Registered instance of the station-IP event callback. */
 static esp_event_handler_instance_t s_ip_handler;
-static esp_netif_t *s_netif;
+/** Default station network interface, retained during AP fallback. */
+static esp_netif_t *s_sta_netif;
+/** Default access-point network interface used during fallback. */
+static esp_netif_t *s_ap_netif;
+/** Active HTTP server, or `NULL` while stopped. */
 static httpd_handle_t s_server;
+/** Whether component startup completed successfully. */
 static bool s_started;
+/** Whether mDNS must be released during shutdown. */
 static bool s_mdns_started;
+/** Suppresses automatic station connection during an AP-mode network scan. */
 static bool s_wifi_scan_in_progress;
+/** Background task that searches for the configured station network. */
+static TaskHandle_t s_reconnect_task;
+/** Logical operating mode selected by component startup. */
 static wifi_mode_t s_wifi_mode = WIFI_MODE_NULL;
+/** Application callback for generic controller commands. */
 static esp32_wifi_drone_remote_api_handler_t s_api_handler;
+/** Application context passed to @ref s_api_handler. */
 static void *s_api_context;
+/** Application callback receiving latency samples. */
 static esp32_wifi_drone_remote_latency_handler_t s_latency_handler;
+/** Application context passed to @ref s_latency_handler. */
 static void *s_latency_context;
+/** Browser round-trip time considered a timeout, in milliseconds. */
 static uint32_t s_latency_timeout_ms = 150U;
+/** Application callback supplying flight telemetry. */
 static esp32_wifi_drone_remote_telemetry_handler_t s_telemetry_handler;
+/** Application context passed to @ref s_telemetry_handler. */
 static void *s_telemetry_context;
+/** Application callback reading IMU configuration. */
 static esp32_wifi_drone_remote_imu_get_handler_t s_imu_get_handler;
+/** Application callback applying IMU configuration. */
 static esp32_wifi_drone_remote_imu_set_handler_t s_imu_set_handler;
+/** Shared application context for the IMU callbacks. */
 static void *s_imu_context;
+/** Application callback reading one ESC channel configuration. */
 static esp32_wifi_drone_remote_esc_get_handler_t s_esc_get_handler;
+/** Application callback applying one ESC channel configuration. */
 static esp32_wifi_drone_remote_esc_set_handler_t s_esc_set_handler;
+/** Application callback applying manual ESC throttle. */
 static esp32_wifi_drone_remote_esc_throttle_handler_t s_esc_throttle_handler;
+/** Application callback executing an ESC programming step. */
 static esp32_wifi_drone_remote_esc_program_handler_t s_esc_program_handler;
+/** Shared application context for all ESC callbacks. */
 static void *s_esc_context;
-static char s_saved_station_ssid[33];
-static char s_saved_station_password[65];
-static char s_saved_ap_ssid[33];
-static char s_saved_ap_password[65];
+/** Runtime configuration after applying all persisted overrides. */
 static esp32_wifi_drone_remote_config_t s_effective_config;
-
-extern const uint8_t controller_html_start[]
-    asm("_binary_controller_html_start");
-extern const uint8_t wifi_setup_html_start[]
-    asm("_binary_wifi_setup_html_start");
-extern const uint8_t settings_html_start[]
-    asm("_binary_settings_html_start");
-extern const uint8_t wifi_ap_settings_html_start[]
-    asm("_binary_wifi_ap_settings_html_start");
-extern const uint8_t imu_settings_html_start[]
-    asm("_binary_imu_settings_html_start");
-extern const uint8_t esc_settings_html_start[]
-    asm("_binary_esc_settings_html_start");
-extern const uint8_t esc_pwm_channel_settings_html_start[]
-    asm("_binary_esc_pwm_channel_settings_html_start");
-extern const uint8_t esc_manual_html_start[]
-    asm("_binary_esc_manual_html_start");
-extern const uint8_t esc_programming_html_start[]
-    asm("_binary_esc_programming_html_start");
 
 /**
  * @brief Advertise the controller through multicast DNS.
@@ -127,107 +149,6 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
-}
-
-/**
- * @brief Serve the embedded controller page.
- *
- * @param request HTTP GET request for the root URI.
- * @return ESP_OK when the response is sent, otherwise an HTTP-server error.
- */
-static esp_err_t page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)controller_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/**
- * @brief Serve the embedded station configuration page.
- *
- * @param request HTTP GET request for `/wifi`.
- * @return ESP_OK when the response is sent, otherwise an HTTP-server error.
- */
-static esp_err_t wifi_setup_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)wifi_setup_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the embedded settings menu. */
-static esp_err_t settings_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)settings_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the embedded Wi-Fi access-point settings page. */
-static esp_err_t ap_settings_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)wifi_ap_settings_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the embedded ISM330DLC settings page. */
-static esp_err_t imu_settings_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)imu_settings_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the XW30A settings menu. */
-static esp_err_t esc_settings_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)esc_settings_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the XW30A PWM-channel settings page. */
-static esp_err_t esc_pwm_channel_settings_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(
-        request, (const char *)esc_pwm_channel_settings_html_start,
-        HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the manual XW30A throttle-control page. */
-static esp_err_t esc_manual_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)esc_manual_html_start,
-                           HTTPD_RESP_USE_STRLEN);
-}
-
-/** @brief Serve the guided XW30A programming page. */
-static esp_err_t esc_programming_page_handler(httpd_req_t *request)
-{
-    httpd_resp_set_type(request, "text/html");
-    httpd_resp_set_hdr(request, "Cache-Control",
-                       "no-store, no-cache, must-revalidate");
-    return httpd_resp_send(request, (const char *)esc_programming_html_start,
-                           HTTPD_RESP_USE_STRLEN);
 }
 
 /**
@@ -289,6 +210,9 @@ static esp_err_t status_handler(httpd_req_t *request)
 
 /**
  * @brief Receive a browser latency sample and notify the application.
+ *
+ * @param[in] request HTTP POST request for `/api/latency`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
  */
 static esp_err_t latency_handler(httpd_req_t *request)
 {
@@ -321,6 +245,9 @@ static esp_err_t latency_handler(httpd_req_t *request)
 
 /**
  * @brief Return application-provided IMU vectors as JSON.
+ *
+ * @param[in] request HTTP GET request for `/api/telemetry`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
  */
 static esp_err_t telemetry_handler(httpd_req_t *request)
 {
@@ -350,7 +277,12 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
     return httpd_resp_send(request, response, length);
 }
 
-/** @brief Return current application-provided IMU acquisition settings. */
+/**
+ * @brief Return current application-provided IMU acquisition settings.
+ *
+ * @param[in] request HTTP GET request for `/api/imu-config`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t imu_config_get_handler(httpd_req_t *request)
 {
     if (s_imu_get_handler == NULL) {
@@ -375,7 +307,12 @@ static esp_err_t imu_config_get_handler(httpd_req_t *request)
     return httpd_resp_send(request, response, length);
 }
 
-/** @brief Validate and dispatch submitted IMU acquisition settings. */
+/**
+ * @brief Validate and dispatch submitted IMU acquisition settings.
+ *
+ * @param[in] request HTTP POST request for `/api/imu-config`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t imu_config_post_handler(httpd_req_t *request)
 {
     char body[128];
@@ -424,7 +361,12 @@ static esp_err_t imu_config_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
-/** @brief Return the active configuration for a selected ESC channel. */
+/**
+ * @brief Return the active configuration for a selected ESC channel.
+ *
+ * @param[in] request HTTP GET request for `/api/esc-config`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t esc_config_get_handler(httpd_req_t *request)
 {
     char query[32];
@@ -464,7 +406,12 @@ static esp_err_t esc_config_get_handler(httpd_req_t *request)
     return httpd_resp_send(request, response, length);
 }
 
-/** @brief Validate and dispatch a selected ESC channel's configuration. */
+/**
+ * @brief Validate and dispatch a selected ESC channel's configuration.
+ *
+ * @param[in] request HTTP POST request for `/api/esc-config`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t esc_config_post_handler(httpd_req_t *request)
 {
     char body[192];
@@ -526,7 +473,12 @@ static esp_err_t esc_config_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
-/** @brief Apply a manual normalized throttle value to one ESC channel. */
+/**
+ * @brief Apply a manual normalized throttle value to one ESC channel.
+ *
+ * @param[in] request HTTP POST request for `/api/esc-throttle`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t esc_throttle_post_handler(httpd_req_t *request)
 {
     char body[64];
@@ -566,7 +518,12 @@ static esp_err_t esc_throttle_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
-/** @brief Dispatch one guided ESC programming step. */
+/**
+ * @brief Dispatch one guided ESC programming step.
+ *
+ * @param[in] request HTTP POST request for `/api/esc-programming`.
+ * @return ESP_OK after responding, otherwise an HTTP-server error.
+ */
 static esp_err_t esc_programming_post_handler(httpd_req_t *request)
 {
     char body[64];
@@ -678,7 +635,14 @@ static void delayed_restart_task(void *context)
     esp_restart();
 }
 
-/** @brief Escape one Wi-Fi SSID for inclusion in a JSON string. */
+/**
+ * @brief Escape one Wi-Fi SSID for inclusion in a JSON string.
+ *
+ * @param[in] ssid NUL-terminated SSID bytes.
+ * @param[out] escaped Destination for the NUL-terminated JSON string content.
+ * @param[in] size Capacity of @p escaped in bytes.
+ * @return `true` on success, or `false` if the destination is too small.
+ */
 static bool json_escape_ssid(const uint8_t *ssid, char *escaped, size_t size)
 {
     size_t output = 0U;
@@ -716,6 +680,9 @@ static bool json_escape_ssid(const uint8_t *ssid, char *escaped, size_t size)
  *
  * AP-only operation is temporarily changed to AP+station mode so the access
  * point remains available while the station interface performs the scan.
+ *
+ * @param[in] request HTTP GET request for `/api/wifi-scan`.
+ * @return ESP_OK after responding, otherwise a Wi-Fi or HTTP-server error.
  */
 static esp_err_t wifi_scan_handler(httpd_req_t *request)
 {
@@ -805,30 +772,6 @@ static esp_err_t wifi_scan_handler(httpd_req_t *request)
 }
 
 /**
- * @brief Persist station credentials in their dedicated NVS partition.
- */
-static esp_err_t save_station_credentials(const char *ssid,
-                                          const char *password)
-{
-    nvs_handle_t nvs = 0;
-    esp_err_t err = nvs_open_from_partition(
-        WIFI_CREDENTIALS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READWRITE, &nvs);
-    if (err == ESP_OK) {
-        err = nvs_set_str(nvs, "sta_ssid", ssid);
-    }
-    if (err == ESP_OK) {
-        err = nvs_set_str(nvs, "sta_password", password);
-    }
-    if (err == ESP_OK) {
-        err = nvs_commit(nvs);
-    }
-    if (nvs != 0) {
-        nvs_close(nvs);
-    }
-    return err;
-}
-
-/**
  * @brief Store submitted station credentials and schedule a restart.
  *
  * The browser sends URL-encoded `ssid` and `password` fields. Credentials are
@@ -842,8 +785,8 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
 {
     /* URL encoding can expand every input byte to a three-byte %XX token. */
     char body[320];
-    char ssid[sizeof(s_saved_station_ssid) * 3U];
-    char password[sizeof(s_saved_station_password) * 3U];
+    char ssid[WIFI_REMOTE_SSID_SIZE * 3U];
+    char password[WIFI_REMOTE_PASSWORD_SIZE * 3U];
 
     if (request->content_len == 0U ||
         request->content_len >= sizeof(body)) {
@@ -868,8 +811,8 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
                               sizeof(password)) != ESP_OK ||
         url_decode(ssid) != ESP_OK || url_decode(password) != ESP_OK ||
         ssid[0] == '\0' ||
-        strlen(ssid) >= sizeof(s_saved_station_ssid) ||
-        strlen(password) >= sizeof(s_saved_station_password)) {
+        strlen(ssid) >= WIFI_REMOTE_SSID_SIZE ||
+        strlen(password) >= WIFI_REMOTE_PASSWORD_SIZE) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                    "Invalid Wi-Fi credentials");
     }
@@ -929,8 +872,8 @@ static esp_err_t ap_config_get_handler(httpd_req_t *request)
 static esp_err_t ap_config_post_handler(httpd_req_t *request)
 {
     char body[512];
-    char ssid[sizeof(s_saved_ap_ssid) * 3U];
-    char password[sizeof(s_saved_ap_password) * 3U] = "";
+    char ssid[WIFI_REMOTE_SSID_SIZE * 3U];
+    char password[WIFI_REMOTE_PASSWORD_SIZE * 3U] = "";
     char clients_text[4];
     char power_text[4];
     char open_text[2];
@@ -973,13 +916,13 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
     int tx_power = atoi(power_text);
     size_t ssid_length = strlen(ssid);
     size_t password_length = strlen(password);
-    if (ssid_length == 0U || ssid_length >= sizeof(s_saved_ap_ssid) ||
+    if (ssid_length == 0U || ssid_length >= WIFI_REMOTE_SSID_SIZE ||
         clients < 1 || clients > 10 ||
         (tx_power != 20 && tx_power != 40 &&
          tx_power != 60 && tx_power != 78) ||
         (!open_network && password_supplied && password_length > 0U &&
          password_length < 8U) ||
-        password_length >= sizeof(s_saved_ap_password)) {
+        password_length >= WIFI_REMOTE_PASSWORD_SIZE) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
                                    "Invalid access-point settings");
     }
@@ -1023,107 +966,6 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
         ESP_LOGE(TAG, "Could not create restart task");
     }
     return err;
-}
-
-/**
- * @brief Override compile-time network settings with values stored in NVS.
- *
- * Missing or invalid saved values are ignored, leaving the supplied runtime
- * configuration unchanged.
- *
- * @param config Runtime configuration supplied by the application.
- * @param effective Destination configuration used for Wi-Fi startup.
- */
-static void apply_saved_network_config(
-    const esp32_wifi_drone_remote_config_t *config,
-    esp32_wifi_drone_remote_config_t *effective)
-{
-    *effective = *config;
-
-    bool station_loaded = false;
-    nvs_handle_t nvs = 0;
-    esp_err_t err = nvs_open_from_partition(
-        WIFI_CREDENTIALS_PARTITION, WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs);
-
-    size_t ssid_size = sizeof(s_saved_station_ssid);
-    size_t password_size = sizeof(s_saved_station_password);
-    if (err == ESP_OK) {
-        err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
-    }
-    if (err == ESP_OK) {
-        err = nvs_get_str(nvs, "sta_password", s_saved_station_password,
-                          &password_size);
-        if (err == ESP_ERR_NVS_NOT_FOUND) {
-            s_saved_station_password[0] = '\0';
-            err = ESP_OK;
-        }
-    }
-    if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
-        effective->station_ssid = s_saved_station_ssid;
-        effective->station_password = s_saved_station_password;
-        station_loaded = true;
-        ESP_LOGI(TAG, "Using station credentials saved from the setup page");
-    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
-        ESP_LOGW(TAG, "Ignoring invalid saved station credentials: %s",
-                 esp_err_to_name(err));
-    }
-    if (nvs != 0) {
-        nvs_close(nvs);
-        nvs = 0;
-    }
-
-    if (!station_loaded &&
-        nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs) == ESP_OK) {
-        ssid_size = sizeof(s_saved_station_ssid);
-        password_size = sizeof(s_saved_station_password);
-        err = nvs_get_str(nvs, "sta_ssid", s_saved_station_ssid, &ssid_size);
-        if (err == ESP_OK) {
-            err = nvs_get_str(nvs, "sta_password",
-                              s_saved_station_password, &password_size);
-            if (err == ESP_ERR_NVS_NOT_FOUND) {
-                s_saved_station_password[0] = '\0';
-                err = ESP_OK;
-            }
-        }
-        nvs_close(nvs);
-        nvs = 0;
-        if (err == ESP_OK && s_saved_station_ssid[0] != '\0') {
-            effective->station_ssid = s_saved_station_ssid;
-            effective->station_password = s_saved_station_password;
-            station_loaded = true;
-            err = save_station_credentials(s_saved_station_ssid,
-                                           s_saved_station_password);
-            if (err == ESP_OK) {
-                ESP_LOGI(TAG, "Migrated station credentials to dedicated NVS");
-            } else {
-                ESP_LOGW(TAG, "Could not migrate station credentials: %s",
-                         esp_err_to_name(err));
-            }
-        }
-    }
-
-    err = nvs_open(WIFI_NVS_NAMESPACE, NVS_READONLY, &nvs);
-    if (err != ESP_OK) {
-        return;
-    }
-    size_t ap_ssid_size = sizeof(s_saved_ap_ssid);
-    size_t ap_password_size = sizeof(s_saved_ap_password);
-    if (nvs_get_str(nvs, "ap_ssid", s_saved_ap_ssid,
-                    &ap_ssid_size) == ESP_OK &&
-        nvs_get_str(nvs, "ap_password", s_saved_ap_password,
-                    &ap_password_size) == ESP_OK) {
-        effective->ap_ssid = s_saved_ap_ssid;
-        effective->ap_password = s_saved_ap_password;
-    }
-    uint8_t clients;
-    int8_t tx_power;
-    if (nvs_get_u8(nvs, "ap_clients", &clients) == ESP_OK) {
-        effective->ap_max_connections = clients;
-    }
-    if (nvs_get_i8(nvs, "ap_tx_power", &tx_power) == ESP_OK) {
-        effective->ap_tx_power_quarter_dbm = tx_power;
-    }
-    nvs_close(nvs);
 }
 
 /**
@@ -1404,6 +1246,85 @@ static esp_err_t start_webserver(void)
 }
 
 /**
+ * @brief Periodically reconnect to the saved station network after AP fallback.
+ *
+ * @details Scanning runs in AP+station mode so the setup access point remains
+ * available. A station connection is attempted only when the configured SSID
+ * appears in the scan results. After obtaining an IP address, the access point
+ * is disabled and the task terminates.
+ *
+ * @param[in] context Unused task context.
+ */
+static void station_reconnect_task(void *context)
+{
+    (void)context;
+    vTaskDelay(pdMS_TO_TICKS(5000U));
+
+    while (s_started && s_wifi_mode == WIFI_MODE_AP) {
+        s_wifi_scan_in_progress = true;
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        if (err == ESP_OK) {
+            const wifi_scan_config_t scan_config = {
+                .show_hidden = true,
+                .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+            };
+            err = esp_wifi_scan_start(&scan_config, true);
+        }
+
+        bool known_network_found = false;
+        if (err == ESP_OK) {
+            wifi_ap_record_t records[20];
+            uint16_t count = sizeof(records) / sizeof(records[0]);
+            err = esp_wifi_scan_get_ap_records(&count, records);
+            for (uint16_t index = 0U; err == ESP_OK && index < count;
+                 ++index) {
+                if (strcmp((const char *)records[index].ssid,
+                           s_effective_config.station_ssid) == 0) {
+                    known_network_found = true;
+                    break;
+                }
+            }
+        }
+
+        if (known_network_found) {
+            xEventGroupClearBits(
+                s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT);
+            s_wifi_scan_in_progress = false;
+            err = esp_wifi_connect();
+            EventBits_t bits = 0U;
+            if (err == ESP_OK) {
+                bits = xEventGroupWaitBits(
+                    s_wifi_events, WIFI_CONNECTED_BIT | WIFI_FAILED_BIT,
+                    pdTRUE, pdFALSE,
+                    pdMS_TO_TICKS(s_effective_config.station_timeout_ms));
+            }
+            if ((bits & WIFI_CONNECTED_BIT) != 0U) {
+                ESP_LOGI(TAG, "Reconnected to Wi-Fi network \"%s\"",
+                         s_effective_config.station_ssid);
+                err = esp_wifi_set_mode(WIFI_MODE_STA);
+                if (err == ESP_OK) {
+                    s_wifi_mode = WIFI_MODE_STA;
+                    if (s_ap_netif != NULL) {
+                        esp_netif_destroy_default_wifi(s_ap_netif);
+                        s_ap_netif = NULL;
+                    }
+                    break;
+                }
+            }
+        }
+
+        s_wifi_scan_in_progress = true;
+        (void)esp_wifi_disconnect();
+        (void)esp_wifi_set_mode(WIFI_MODE_AP);
+        s_wifi_scan_in_progress = false;
+        vTaskDelay(pdMS_TO_TICKS(WIFI_RECONNECT_INTERVAL_MS));
+    }
+
+    s_reconnect_task = NULL;
+    vTaskDelete(NULL);
+}
+
+/**
  * @brief Initialize NVS, the network stack, the event loop, and Wi-Fi.
  *
  * @return ESP_OK on success, otherwise the first ESP-IDF initialization error.
@@ -1456,12 +1377,13 @@ static esp_err_t start_station(const esp32_wifi_drone_remote_config_t *config)
         return ESP_ERR_INVALID_ARG;
     }
 
-    s_netif = esp_netif_create_default_wifi_sta();
-    if (s_netif == NULL) {
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_sta_netif == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    ESP_RETURN_ON_ERROR(esp_netif_set_hostname(s_netif, NETWORK_HOSTNAME), TAG,
-                        "Could not set station hostname");
+    ESP_RETURN_ON_ERROR(
+        esp_netif_set_hostname(s_sta_netif, NETWORK_HOSTNAME), TAG,
+        "Could not set station hostname");
 
     wifi_config_t wifi_config = { 0 };
     snprintf((char *)wifi_config.sta.ssid, sizeof(wifi_config.sta.ssid), "%s",
@@ -1508,12 +1430,13 @@ static esp_err_t start_access_point(
         return ESP_ERR_INVALID_ARG;
     }
 
-    s_netif = esp_netif_create_default_wifi_ap();
-    if (s_netif == NULL) {
+    s_ap_netif = esp_netif_create_default_wifi_ap();
+    if (s_ap_netif == NULL) {
         return ESP_ERR_NO_MEM;
     }
-    ESP_RETURN_ON_ERROR(esp_netif_set_hostname(s_netif, NETWORK_HOSTNAME), TAG,
-                        "Could not set access-point hostname");
+    ESP_RETURN_ON_ERROR(
+        esp_netif_set_hostname(s_ap_netif, NETWORK_HOSTNAME), TAG,
+        "Could not set access-point hostname");
 
     wifi_config_t wifi_config = { 0 };
     snprintf((char *)wifi_config.ap.ssid, sizeof(wifi_config.ap.ssid), "%s",
@@ -1538,6 +1461,7 @@ static esp_err_t start_access_point(
     return ESP_OK;
 }
 
+/** @copydoc esp32_wifi_drone_remote_start() */
 esp_err_t esp32_wifi_drone_remote_start(
     const esp32_wifi_drone_remote_config_t *config)
 {
@@ -1603,8 +1527,6 @@ esp_err_t esp32_wifi_drone_remote_start(
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "Station connection failed; starting access point");
             esp_wifi_stop();
-            esp_netif_destroy_default_wifi(s_netif);
-            s_netif = NULL;
             err = start_access_point(&effective_config);
         }
     } else {
@@ -1623,11 +1545,24 @@ esp_err_t esp32_wifi_drone_remote_start(
     }
 
     s_started = true;
+    if (s_wifi_mode == WIFI_MODE_AP &&
+        effective_config.station_ssid[0] != '\0' &&
+        xTaskCreate(station_reconnect_task, "wifi-reconnect", 4096, NULL, 4,
+                    &s_reconnect_task) != pdPASS) {
+        ESP_LOGW(TAG, "Could not start station reconnection task");
+        s_reconnect_task = NULL;
+    }
     return ESP_OK;
 }
 
+/** @copydoc esp32_wifi_drone_remote_stop() */
 esp_err_t esp32_wifi_drone_remote_stop(void)
 {
+    s_started = false;
+    if (s_reconnect_task != NULL) {
+        vTaskDelete(s_reconnect_task);
+        s_reconnect_task = NULL;
+    }
     if (s_server != NULL) {
         httpd_stop(s_server);
         s_server = NULL;
@@ -1637,9 +1572,13 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
         s_mdns_started = false;
     }
     esp_wifi_stop();
-    if (s_netif != NULL) {
-        esp_netif_destroy_default_wifi(s_netif);
-        s_netif = NULL;
+    if (s_sta_netif != NULL) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
+    if (s_ap_netif != NULL) {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
     }
     if (s_wifi_handler != NULL) {
         esp_event_handler_instance_unregister(
@@ -1656,7 +1595,6 @@ esp_err_t esp32_wifi_drone_remote_stop(void)
         vEventGroupDelete(s_wifi_events);
         s_wifi_events = NULL;
     }
-    s_started = false;
     s_api_handler = NULL;
     s_api_context = NULL;
     s_latency_handler = NULL;

@@ -37,6 +37,10 @@ The controller's **Connect** button opens `/wifi`, where station credentials
 can be saved from a phone. Submitted credentials are stored in NVS and take
 priority over the menuconfig defaults. The ESP32 restarts, attempts the saved
 network, and returns to access-point mode if that attempt fails.
+While the fallback access point is active, the ESP32 scans for the saved
+station network every 15 seconds. It retries the saved credentials when that
+SSID becomes visible and switches to station mode after receiving an IP
+address.
 
 The controller is optimized for landscape phone use, respects display safe
 areas, limits joystick requests to 20 updates per second, and provides a
