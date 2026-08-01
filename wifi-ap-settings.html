@@ -61,6 +61,15 @@
         <option value="78">Maximum — 19.5 dBm</option>
       </select>
 
+      <label for="control_timeout_ms">Control signal timeout (ms)</label>
+      <input id="control_timeout_ms" name="control_timeout_ms" type="number"
+             min="100" max="60000" required>
+
+      <label for="timeout_throttle_percent">Timeout throttle (%)</label>
+      <input id="timeout_throttle_percent" name="timeout_throttle_percent"
+             type="number" min="0" max="100" step="0.1" required>
+      <small>Applied without disarming when flight commands time out.</small>
+
       <button type="submit">Save and restart</button>
       <p id="status" role="status"></p>
     </form>
@@ -81,6 +90,8 @@
       form.ssid.value = config.ssid;
       form.clients.value = config.max_connections;
       form.tx_power.value = config.tx_power;
+      form.control_timeout_ms.value = config.control_timeout_ms;
+      form.timeout_throttle_percent.value = config.timeout_throttle_percent;
       status.textContent = config.password_set
         ? "A password is currently configured." : "The network is currently open.";
     }

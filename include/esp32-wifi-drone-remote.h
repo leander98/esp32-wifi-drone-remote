@@ -215,6 +215,10 @@ typedef struct {
     void *latency_context;
     /** Latency above this value is reported as a timeout. */
     uint32_t latency_timeout_ms;
+    /** Time without a flight command before fallback throttle is used. */
+    uint32_t control_timeout_ms;
+    /** Normalized throttle used after the control timeout. */
+    float timeout_throttle;
     /** Optional callback supplying accelerometer and gyroscope values. */
     esp32_wifi_drone_remote_telemetry_handler_t telemetry_handler;
     /** Application value passed to telemetry_handler. */
@@ -263,6 +267,8 @@ typedef struct {
         .latency_handler = NULL,                                        \
         .latency_context = NULL,                                        \
         .latency_timeout_ms = 150,                                      \
+        .control_timeout_ms = 750,                                      \
+        .timeout_throttle = 0.06f,                                      \
         .telemetry_handler = NULL,                                      \
         .telemetry_context = NULL,                                      \
         .imu_get_handler = NULL,                                        \

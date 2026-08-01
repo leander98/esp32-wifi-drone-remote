@@ -1016,15 +1016,18 @@ static esp_err_t ap_config_get_handler(httpd_req_t *request)
     }
     escaped_ssid[output] = '\0';
 
-    char response[180];
+    char response[240];
     int length = snprintf(
         response, sizeof(response),
         "{\"ssid\":\"%s\",\"password_set\":%s,"
-        "\"max_connections\":%u,\"tx_power\":%d}",
+        "\"max_connections\":%u,\"tx_power\":%d,"
+        "\"control_timeout_ms\":%lu,\"timeout_throttle_percent\":%.1f}",
         escaped_ssid,
         s_effective_config.ap_password[0] != '\0' ? "true" : "false",
         s_effective_config.ap_max_connections,
-        s_effective_config.ap_tx_power_quarter_dbm);
+        s_effective_config.ap_tx_power_quarter_dbm,
+        (unsigned long)s_effective_config.control_timeout_ms,
+        s_effective_config.timeout_throttle * 100.0f);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, response, length);
@@ -1040,6 +1043,8 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
     char password[WIFI_REMOTE_PASSWORD_SIZE * 3U] = "";
     char clients_text[4];
     char power_text[4];
+    char timeout_text[12];
+    char fallback_text[8];
     char open_text[2];
 
     if (request->content_len == 0U ||
@@ -1070,6 +1075,10 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
                               sizeof(clients_text)) != ESP_OK ||
         httpd_query_key_value(body, "tx_power", power_text,
                               sizeof(power_text)) != ESP_OK ||
+        httpd_query_key_value(body, "control_timeout_ms", timeout_text,
+                              sizeof(timeout_text)) != ESP_OK ||
+        httpd_query_key_value(body, "timeout_throttle_percent", fallback_text,
+                              sizeof(fallback_text)) != ESP_OK ||
         url_decode(ssid) != ESP_OK ||
         (password_supplied && url_decode(password) != ESP_OK)) {
         return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
@@ -1078,12 +1087,18 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
 
     int clients = atoi(clients_text);
     int tx_power = atoi(power_text);
+    unsigned long control_timeout_ms = strtoul(timeout_text, NULL, 10);
+    float timeout_throttle_percent = strtof(fallback_text, NULL);
     size_t ssid_length = strlen(ssid);
     size_t password_length = strlen(password);
     if (ssid_length == 0U || ssid_length >= WIFI_REMOTE_SSID_SIZE ||
         clients < 1 || clients > 10 ||
         (tx_power != 20 && tx_power != 40 &&
          tx_power != 60 && tx_power != 78) ||
+        control_timeout_ms < 100U || control_timeout_ms > 60000U ||
+        !isfinite(timeout_throttle_percent) ||
+        timeout_throttle_percent < 0.0f ||
+        timeout_throttle_percent > 100.0f ||
         (!open_network && password_supplied && password_length > 0U &&
          password_length < 8U) ||
         password_length >= WIFI_REMOTE_PASSWORD_SIZE) {
@@ -1109,6 +1124,14 @@ static esp_err_t ap_config_post_handler(httpd_req_t *request)
     }
     if (err == ESP_OK) {
         err = nvs_set_i8(nvs, "ap_tx_power", (int8_t)tx_power);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u32(nvs, "ctrl_timeout",
+                          (uint32_t)control_timeout_ms);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u16(nvs, "timeout_thr", (uint16_t)
+                          (timeout_throttle_percent * 10.0f + 0.5f));
     }
     if (err == ESP_OK) {
         err = nvs_commit(nvs);
@@ -1552,9 +1575,10 @@ static esp_err_t initialize_platform(void)
 
     err = nvs_flash_init_partition(WIFI_CREDENTIALS_PARTITION);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Persistent Wi-Fi credential storage unavailable: %s",
+        ESP_LOGW(TAG, "Persistent Wi-Fi credential storage unavailable: %s",
                  esp_err_to_name(err));
-        return err;
+        //return err;
+        // Continue without persistent storage.
     }
 
     err = esp_netif_init();
@@ -1683,7 +1707,10 @@ esp_err_t esp32_wifi_drone_remote_start(
         config->ap_tx_power_quarter_dbm > 78 ||
         config->station_ssid == NULL || config->station_password == NULL ||
         config->station_timeout_ms == 0U ||
-        config->latency_timeout_ms == 0U) {
+        config->latency_timeout_ms == 0U ||
+        config->control_timeout_ms == 0U ||
+        config->timeout_throttle < 0.0f ||
+        config->timeout_throttle > 1.0f) {
         return ESP_ERR_INVALID_ARG;
     }
 

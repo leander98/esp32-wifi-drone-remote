@@ -125,11 +125,21 @@ void apply_saved_network_config(
     }
     uint8_t clients;
     int8_t tx_power;
+    uint32_t control_timeout_ms;
+    uint16_t timeout_throttle_permille;
     if (nvs_get_u8(nvs, "ap_clients", &clients) == ESP_OK) {
         effective->ap_max_connections = clients;
     }
     if (nvs_get_i8(nvs, "ap_tx_power", &tx_power) == ESP_OK) {
         effective->ap_tx_power_quarter_dbm = tx_power;
+    }
+    if (nvs_get_u32(nvs, "ctrl_timeout", &control_timeout_ms) == ESP_OK) {
+        effective->control_timeout_ms = control_timeout_ms;
+    }
+    if (nvs_get_u16(nvs, "timeout_thr", &timeout_throttle_permille) ==
+        ESP_OK && timeout_throttle_permille <= 1000U) {
+        effective->timeout_throttle =
+            (float)timeout_throttle_permille / 1000.0f;
     }
     nvs_close(nvs);
 }
