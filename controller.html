@@ -279,6 +279,8 @@
     let roll = 0;
     let pitch = 0;
     let yaw = 0;
+    let gyroBias = { x: 0, y: 0, z: 0 };
+    let gyroBiasInitialized = false;
     let previousTelemetryAt;
 
     try {
@@ -566,6 +568,28 @@
         previousTelemetryAt = now;
         const acceleration = sample.accelerometer;
         const gyroscope = sample.gyroscope;
+        const accelerationMagnitude = Math.hypot(
+          acceleration.x, acceleration.y, acceleration.z
+        );
+        const gyroMagnitude = Math.hypot(
+          gyroscope.x, gyroscope.y, gyroscope.z
+        );
+        const stationary = Math.abs(accelerationMagnitude - 1) < .08
+          && gyroMagnitude < 5;
+        if (stationary) {
+          const biasWeight = gyroBiasInitialized
+            ? Math.min(dt / 5, 1) : 1;
+          for (const axis of ["x", "y", "z"]) {
+            gyroBias[axis] += biasWeight
+              * (gyroscope[axis] - gyroBias[axis]);
+          }
+          gyroBiasInitialized = true;
+        }
+        const correctedGyroscope = {
+          x: gyroscope.x - gyroBias.x,
+          y: gyroscope.y - gyroBias.y,
+          z: gyroscope.z - gyroBias.z,
+        };
         const accelerationRoll = Math.atan2(
           acceleration.y, acceleration.z
         ) * 180 / Math.PI;
@@ -573,9 +597,11 @@
           -acceleration.x,
           Math.hypot(acceleration.y, acceleration.z)
         ) * 180 / Math.PI;
-        roll = .98 * (roll + gyroscope.x * dt) + .02 * accelerationRoll;
-        pitch = .98 * (pitch + gyroscope.y * dt) + .02 * accelerationPitch;
-        yaw = (yaw + gyroscope.z * dt + 360) % 360;
+        roll = .98 * (roll + correctedGyroscope.x * dt)
+          + .02 * accelerationRoll;
+        pitch = .98 * (pitch + correctedGyroscope.y * dt)
+          + .02 * accelerationPitch;
+        yaw = (yaw + correctedGyroscope.z * dt + 360) % 360;
         telemetryValues.textContent =
           `A ${acceleration.x.toFixed(2)} ${acceleration.y.toFixed(2)} `
           + `${acceleration.z.toFixed(2)} g\n`
@@ -601,6 +627,8 @@
         roll = 0;
         pitch = 0;
         yaw = 0;
+        gyroBias = { x: 0, y: 0, z: 0 };
+        gyroBiasInitialized = false;
         previousTelemetryAt = undefined;
         updateTelemetry();
         telemetryTimer = setInterval(updateTelemetry, 100);

@@ -17,10 +17,38 @@
     .item+.item{margin-top:12px}
     .item b{display:block;font-size:1.1rem}
     .item span{display:block;margin-top:5px;color:#657184}
+    .layout{margin-bottom:16px;padding:18px 20px;border-radius:16px;background:#fff;
+      box-shadow:0 8px 28px #18212f18;text-align:center}
+    .layout h2{margin:0 0 4px;font-size:1.05rem}
+    .layout p{margin:0;color:#657184;font-size:.9rem}
+    .drone{position:relative;width:190px;height:150px;margin:12px auto 4px}
+    .drone::before,.drone::after{content:"";position:absolute;left:28px;top:72px;
+      width:134px;height:7px;border-radius:5px;background:#6f7b89;transform:rotate(38deg)}
+    .drone::after{transform:rotate(-38deg)}
+    .body{position:absolute;z-index:1;left:73px;top:50px;width:44px;height:50px;
+      border-radius:50% 50% 42% 42%;background:#263445;border:4px solid #fff}
+    .body::before{content:"";position:absolute;left:15px;top:-16px;border-left:5px solid transparent;
+      border-right:5px solid transparent;border-bottom:13px solid #e63946}
+    .motor{position:absolute;z-index:2;display:grid;place-items:center;width:46px;
+      height:46px;border:4px solid #3b4c63;border-radius:50%;background:#eef2f7;
+      color:#18212f;font-size:1.2rem;font-weight:800;box-shadow:0 2px 7px #18212f25}
+    .m1{left:5px;top:4px}.m2{right:5px;top:4px}.m3{right:5px;bottom:4px}
+    .m4{left:5px;bottom:4px}.front{font-weight:750;color:#e63946!important}
   </style>
 </head>
 <body><main>
   <header><a class="back" href="/settings">Back</a><h1>XW30A ESC settings</h1></header>
+  <section class="layout" aria-labelledby="motor-layout-title">
+    <h2 id="motor-layout-title">Motor layout</h2>
+    <p class="front">▲ FRONT</p>
+    <div class="drone" role="img"
+         aria-label="Quad X layout: ESC 1 front left, ESC 2 front right, ESC 3 rear right, ESC 4 rear left">
+      <span class="motor m1">1</span><span class="motor m2">2</span>
+      <span class="body" aria-hidden="true"></span>
+      <span class="motor m4">4</span><span class="motor m3">3</span>
+    </div>
+    <p>1 front-left · 2 front-right · 3 rear-right · 4 rear-left</p>
+  </section>
   <a class="item" href="/settings/esc/pwm-channels">
     <b>PWM-channel settings</b>
     <span>Configure each ESC channel's GPIO and PWM signal range</span>

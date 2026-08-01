@@ -59,11 +59,26 @@
       form.min_pulse.add(new Option(`${pulse} µs`,pulse));
     for(let pulse=1800;pulse<=2200;pulse+=50)
       form.max_pulse.add(new Option(`${pulse} µs`,pulse));
+    async function getChannel(index){
+      const response=await fetch(`/api/esc-config?index=${index}`,{cache:"no-store"});
+      if(!response.ok)throw new Error(await response.text());
+      return response.json();
+    }
     async function load(){
       status.textContent="Loading…";
-      const response=await fetch(`/api/esc-config?index=${form.index.value}`,{cache:"no-store"});
-      if(!response.ok)throw new Error(await response.text());
-      const value=await response.json();
+      const selected=Number(form.index.value);
+      const channels=await Promise.all([0,1,2,3].map(getChannel));
+      const value=channels[selected];
+      const occupied=new Map(channels
+        .filter(channel=>channel.index!==selected)
+        .map(channel=>[channel.gpio,channel.index+1]));
+      for(const option of form.gpio.options){
+        const owner=occupied.get(Number(option.value));
+        option.disabled=Boolean(owner);
+        option.textContent=owner
+          ? `GPIO ${option.value} (used by ESC ${owner})`
+          : `GPIO ${option.value}`;
+      }
       for(const key of ["gpio","frequency","min_pulse","max_pulse","calibration_ms"])
         form[key].value=value[key];
       status.textContent="";

@@ -586,6 +586,19 @@ static esp_err_t esc_config_post_handler(httpd_req_t *request)
     };
     esp_err_t err = s_esc_set_handler(&config, s_esc_context);
     if (err != ESP_OK) {
+        if (err == ESP_ERR_INVALID_ARG) {
+            return httpd_resp_send_err(request, HTTPD_400_BAD_REQUEST,
+                                       "GPIO or PWM settings are invalid");
+        }
+        if (err == ESP_ERR_INVALID_STATE) {
+            httpd_resp_set_status(request, "409 Conflict");
+            return httpd_resp_sendstr(
+                request, "GPIO is already assigned to another ESC");
+        }
+        if (err == ESP_ERR_TIMEOUT) {
+            httpd_resp_set_status(request, "503 Service Unavailable");
+            return httpd_resp_sendstr(request, "ESC configuration is busy");
+        }
         return httpd_resp_send_err(request,
                                    HTTPD_500_INTERNAL_SERVER_ERROR,
                                    esp_err_to_name(err));
