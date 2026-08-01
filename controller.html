@@ -239,6 +239,7 @@
       </div>
       <button id="attitude-toggle" class="secondary"
               aria-pressed="false">Enable attitude</button>
+      <button id="align-imu" class="secondary">Align IMU level</button>
       <div class="telemetry disabled" id="telemetry">
         <canvas id="attitude" aria-label="IMU attitude indicator"></canvas>
         <div class="telemetry-values" id="telemetry-values">
@@ -269,6 +270,7 @@
     const telemetryElement = document.querySelector("#telemetry");
     const telemetryValues = document.querySelector("#telemetry-values");
     const attitudeToggle = document.querySelector("#attitude-toggle");
+    const alignImuButton = document.querySelector("#align-imu");
     const attitudeContext = attitudeCanvas.getContext("2d");
     let statusTimer;
     let telemetryTimer;
@@ -282,6 +284,27 @@
     let gyroBias = { x: 0, y: 0, z: 0 };
     let gyroBiasInitialized = false;
     let previousTelemetryAt;
+    let levelCandidateSince;
+
+    alignImuButton.onclick = async () => {
+      alignImuButton.disabled = true;
+      try {
+        const response = await fetch("/api/settings", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ align_imu: true }),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        roll = 0; pitch = 0; yaw = 0;
+        gyroBias = { x: 0, y: 0, z: 0 };
+        gyroBiasInitialized = false;
+        statusEl.textContent = "IMU level aligned";
+      } catch (error) {
+        statusEl.textContent = `Alignment failed: ${error.message}`;
+      } finally {
+        alignImuButton.disabled = flightArmed;
+      }
+    };
 
     try {
       document.body.classList.toggle(
@@ -326,6 +349,7 @@
       armButton.classList.toggle("arm-armed", flightArmed);
       armButton.classList.toggle("arm-disarmed", !flightArmed);
       armButton.setAttribute("aria-pressed", String(flightArmed));
+      alignImuButton.disabled = flightArmed;
     }
 
     armButton.onclick = async () => {
@@ -574,9 +598,15 @@
         const gyroMagnitude = Math.hypot(
           gyroscope.x, gyroscope.y, gyroscope.z
         );
-        const stationary = Math.abs(accelerationMagnitude - 1) < .08
-          && gyroMagnitude < 5;
-        if (stationary) {
+        const levelCandidate = Math.abs(acceleration.x) < .02
+          && Math.abs(acceleration.y) < .02
+          && Math.abs(acceleration.z - 1) < .03
+          && gyroMagnitude < .5;
+        if (!levelCandidate) levelCandidateSince = undefined;
+        else if (levelCandidateSince === undefined) levelCandidateSince = now;
+        const settledLevel = levelCandidate
+          && now - levelCandidateSince >= 3000;
+        if (settledLevel) {
           const biasWeight = gyroBiasInitialized
             ? Math.min(dt / 5, 1) : 1;
           for (const axis of ["x", "y", "z"]) {
@@ -602,6 +632,11 @@
         pitch = .98 * (pitch + correctedGyroscope.y * dt)
           + .02 * accelerationPitch;
         yaw = (yaw + correctedGyroscope.z * dt + 360) % 360;
+        if (settledLevel) {
+          const alignWeight = Math.min(dt / 20, 1);
+          roll *= 1 - alignWeight;
+          pitch *= 1 - alignWeight;
+        }
         telemetryValues.textContent =
           `A ${acceleration.x.toFixed(2)} ${acceleration.y.toFixed(2)} `
           + `${acceleration.z.toFixed(2)} g\n`
@@ -629,6 +664,7 @@
         yaw = 0;
         gyroBias = { x: 0, y: 0, z: 0 };
         gyroBiasInitialized = false;
+        levelCandidateSince = undefined;
         previousTelemetryAt = undefined;
         updateTelemetry();
         telemetryTimer = setInterval(updateTelemetry, 100);
