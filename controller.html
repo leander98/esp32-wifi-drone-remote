@@ -219,7 +219,6 @@
     </div>
     <div class="toolbar">
       <button id="fullscreen" class="secondary">Fullscreen</button>
-      <button id="connect">Connect</button>
       <button id="settings" class="secondary">Settings</button>
     </div>
   </header>
@@ -332,9 +331,6 @@
         localStorage.setItem("drone-theme", dark ? "dark" : "light");
       } catch (error) {}
     });
-    document.querySelector("#connect").onclick = () => {
-      window.location.href = "/wifi";
-    };
     document.querySelector("#settings").onclick = () => {
       window.location.href = "/settings";
     };
@@ -717,8 +713,12 @@
         const now = performance.now();
         if (now - lastSentAt >= 50) {
           lastSentAt = now;
+          const commandX = stick.dataset.stick === "right"
+            ? -currentX : currentX;
+          const commandY = stick.dataset.stick === "right"
+            ? -currentY : currentY;
           send(name, {
-            x: +currentX.toFixed(3), y: +currentY.toFixed(3)
+            x: +commandX.toFixed(3), y: +commandY.toFixed(3)
           });
         }
       }

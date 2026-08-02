@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#18212f">
-  <title>Drone Remote Wi-Fi Setup</title>
+  <title>Wi-Fi Station Settings</title>
   <style>
     :root { font-family: system-ui, sans-serif; color-scheme: light; }
     * { box-sizing: border-box; }
@@ -62,7 +62,7 @@
 </head>
 <body>
   <main>
-    <h1>Connect to Wi-Fi</h1>
+    <h1>Wi-Fi station</h1>
     <p>
       Enter the network the ESP32 should join. The controller will restart
       after saving. If the connection fails, its own access point returns.
@@ -84,7 +84,7 @@
              autocomplete="current-password">
 
       <div class="actions">
-        <a href="/">Cancel</a>
+        <a href="/settings">Back</a>
         <button type="submit">Save and connect</button>
       </div>
       <p id="status" role="status"></p>

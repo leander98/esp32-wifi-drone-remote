@@ -88,9 +88,11 @@ static esp32_wifi_drone_remote_imu_get_handler_t s_imu_get_handler;
 static esp32_wifi_drone_remote_imu_set_handler_t s_imu_set_handler;
 /** Shared application context for the IMU callbacks. */
 static void *s_imu_context;
-/** Application callbacks and context for flight-controller PID tuning. */
+/** Application callback reading flight-controller PID configuration. */
 static esp32_wifi_drone_remote_pid_get_handler_t s_pid_get_handler;
+/** Application callback applying flight-controller PID configuration. */
 static esp32_wifi_drone_remote_pid_set_handler_t s_pid_set_handler;
+/** Shared application context for the PID callbacks. */
 static void *s_pid_context;
 /** Application callback reading one ESC channel configuration. */
 static esp32_wifi_drone_remote_esc_get_handler_t s_esc_get_handler;
@@ -371,7 +373,12 @@ static esp_err_t imu_config_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
-/** @brief Return current application-provided flight PID gains. */
+/**
+ * @brief Return current application-provided flight PID gains.
+ * @param[in] request HTTP GET request for `/api/pid-config`.
+ * @return ESP_OK after responding, otherwise an HTTP-server or application
+ *         callback error.
+ */
 static esp_err_t pid_config_get_handler(httpd_req_t *request)
 {
     if (s_pid_get_handler == NULL) {
@@ -403,7 +410,12 @@ static esp_err_t pid_config_get_handler(httpd_req_t *request)
     return httpd_resp_send(request, response, length);
 }
 
-/** @brief Validate and dispatch submitted flight PID gains. */
+/**
+ * @brief Validate and dispatch submitted flight PID gains.
+ * @param[in] request HTTP POST request for `/api/pid-config`.
+ * @return ESP_OK after responding, otherwise an HTTP receive, validation, or
+ *         application callback error.
+ */
 static esp_err_t pid_config_post_handler(httpd_req_t *request)
 {
     char body[384];
@@ -705,7 +717,12 @@ static esp_err_t esc_programming_post_handler(httpd_req_t *request)
     return httpd_resp_send(request, NULL, 0);
 }
 
-/** @brief Dispatch one guided ESC throttle-range setting step. */
+/**
+ * @brief Dispatch one guided ESC throttle-range setting step.
+ * @param[in] request HTTP POST request containing the ESC index and action.
+ * @return ESP_OK after responding, otherwise an HTTP receive, validation, or
+ *         application callback error.
+ */
 static esp_err_t esc_throttle_range_post_handler(httpd_req_t *request)
 {
     char body[48];
@@ -1017,6 +1034,9 @@ static esp_err_t wifi_config_handler(httpd_req_t *request)
 
 /**
  * @brief Return the effective access-point settings without exposing its key.
+ * @param[in] request HTTP GET request for `/api/ap-config`.
+ * @return ESP_OK after returning the JSON settings response, otherwise an
+ *         HTTP-server error.
  */
 static esp_err_t ap_config_get_handler(httpd_req_t *request)
 {
@@ -1050,6 +1070,9 @@ static esp_err_t ap_config_get_handler(httpd_req_t *request)
 
 /**
  * @brief Persist access-point settings submitted by the settings page.
+ * @param[in] request HTTP POST request containing URL-encoded AP settings.
+ * @return ESP_OK after applying and persisting valid settings, otherwise an
+ *         HTTP receive, validation, storage, or application callback error.
  */
 static esp_err_t ap_config_post_handler(httpd_req_t *request)
 {
@@ -1243,7 +1266,7 @@ static esp_err_t start_webserver(void)
     err = httpd_register_uri_handler(s_server, &page);
 
     const httpd_uri_t wifi_page = {
-        .uri = "/wifi",
+        .uri = "/settings/wifi-sta",
         .method = HTTP_GET,
         .handler = wifi_setup_page_handler,
     };
