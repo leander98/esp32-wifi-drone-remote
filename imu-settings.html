@@ -50,6 +50,9 @@
       <option value="2">±1000 dps</option><option value="3">±2000 dps</option>
     </select>
     <button type="submit">Apply settings</button>
+    <button type="button" id="align" style="background:#3b4c63">
+      Align IMU level
+    </button>
     <p id="status" role="status"></p>
   </form>
   <script>
@@ -63,6 +66,7 @@
     const form = document.querySelector("#imu-form");
     const preset = document.querySelector("#preset");
     const status = document.querySelector("#status");
+    const align = document.querySelector("#align");
     const modes = {
       normal: {accel_odr:6,gyro_odr:6,accel_scale:2,gyro_scale:3},
       slow: {accel_odr:3,gyro_odr:3,accel_scale:0,gyro_scale:1},
@@ -98,6 +102,22 @@
       });
       status.textContent = response.ok ? "Settings applied." :
         `Could not apply: ${await response.text()}`;
+    };
+    align.onclick = async () => {
+      align.disabled = true;
+      status.textContent = "Aligning…";
+      try {
+        const response = await fetch("/api/settings", {
+          method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({align_imu:true}),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        status.textContent = "IMU level aligned.";
+      } catch (error) {
+        status.textContent = `Could not align: ${error.message}`;
+      } finally {
+        align.disabled = false;
+      }
     };
   </script>
 </main></body></html>

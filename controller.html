@@ -95,7 +95,8 @@
     }
     .controls {
       display: grid;
-      grid-template-columns: 1fr minmax(180px, .55fr) 1fr;
+      grid-template-columns: minmax(0, 1fr) minmax(150px, .55fr)
+                             minmax(0, 1fr);
       gap: clamp(8px, 2vw, 24px);
       align-items: center;
       max-width: 1100px;
@@ -108,7 +109,7 @@
     .stick-card { text-align: center; }
     .stick {
       position: relative;
-      width: min(38vw, calc(100dvh - 105px), 310px);
+      width: min(30vw, calc(100dvh - 105px), 310px);
       aspect-ratio: 1;
       border: 2px solid #303846;
       border-radius: 50%;
@@ -139,6 +140,10 @@
     .down { bottom: 8%; left: 50%; transform: translateX(-50%); }
     .left { left: 5%; top: 50%; transform: translateY(-50%); }
     .right { right: 5%; top: 50%; transform: translateY(-50%); }
+    .stick.turn-locked .left, .stick.turn-locked .right {
+      color: var(--muted);
+      text-decoration: line-through;
+    }
     .center { display: grid; gap: 12px; }
     .center button { width: 100%; }
     .telemetry {
@@ -151,6 +156,7 @@
       color: #7b8491;
       position: relative;
       overflow: hidden;
+      cursor: pointer;
     }
     .telemetry canvas { width: 100%; height: 100%; display: block; }
     .telemetry.disabled canvas { display: none; }
@@ -193,6 +199,9 @@
       .telemetry { height: 70px; }
       .center { gap: 6px; }
       .status { display: none; }
+      .controls { gap: 6px; }
+      .center .toolbar { flex-wrap: wrap; }
+      .center .toolbar button { flex: 1 1 65px; padding-inline: 6px; }
     }
   </style>
 </head>
@@ -229,18 +238,14 @@
       <div class="toolbar">
         <button id="arm" class="arm-disarmed"
                 aria-pressed="false">Arm motors</button>
-        <button data-api="turn-lock">Turn lock</button>
+        <button id="turn-lock" class="secondary"
+                aria-pressed="false">Turn lock: off</button>
         <button id="brightness" class="secondary"
                 data-api="brightness">Brightness</button>
       </div>
-      <div class="toolbar">
-        <button class="secondary" data-api="headlight">Headlight</button>
-        <button class="secondary" data-api="sound">Sound</button>
-      </div>
-      <button id="attitude-toggle" class="secondary"
-              aria-pressed="false">Enable attitude</button>
-      <button id="align-imu" class="secondary">Align IMU level</button>
-      <div class="telemetry disabled" id="telemetry">
+      <div class="telemetry disabled" id="telemetry" role="button"
+           tabindex="0" aria-pressed="false"
+           aria-label="Enable attitude indicator">
         <canvas id="attitude" aria-label="IMU attitude indicator"></canvas>
         <div class="telemetry-values" id="telemetry-values">
           Attitude indicator disabled
@@ -269,8 +274,8 @@
     const attitudeCanvas = document.querySelector("#attitude");
     const telemetryElement = document.querySelector("#telemetry");
     const telemetryValues = document.querySelector("#telemetry-values");
-    const attitudeToggle = document.querySelector("#attitude-toggle");
-    const alignImuButton = document.querySelector("#align-imu");
+    const turnLockButton = document.querySelector("#turn-lock");
+    const throttleStick = document.querySelector('[data-stick="left"]');
     const attitudeContext = attitudeCanvas.getContext("2d");
     let statusTimer;
     let telemetryTimer;
@@ -278,6 +283,7 @@
     let flightArmed = false;
     let flightHeartbeatTimer;
     let resetThrottleControl = async () => {};
+    let lockTurnControl = async () => {};
     let roll = 0;
     let pitch = 0;
     let yaw = 0;
@@ -285,25 +291,15 @@
     let gyroBiasInitialized = false;
     let previousTelemetryAt;
     let levelCandidateSince;
+    let turnLocked = false;
 
-    alignImuButton.onclick = async () => {
-      alignImuButton.disabled = true;
-      try {
-        const response = await fetch("/api/settings", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ align_imu: true }),
-        });
-        if (!response.ok) throw new Error(await response.text());
-        roll = 0; pitch = 0; yaw = 0;
-        gyroBias = { x: 0, y: 0, z: 0 };
-        gyroBiasInitialized = false;
-        statusEl.textContent = "IMU level aligned";
-      } catch (error) {
-        statusEl.textContent = `Alignment failed: ${error.message}`;
-      } finally {
-        alignImuButton.disabled = flightArmed;
-      }
+    turnLockButton.onclick = () => {
+      turnLocked = !turnLocked;
+      turnLockButton.textContent = `Turn lock: ${turnLocked ? "on" : "off"}`;
+      turnLockButton.classList.toggle("secondary", !turnLocked);
+      turnLockButton.setAttribute("aria-pressed", String(turnLocked));
+      throttleStick.classList.toggle("turn-locked", turnLocked);
+      if (turnLocked) lockTurnControl();
     };
 
     try {
@@ -349,7 +345,6 @@
       armButton.classList.toggle("arm-armed", flightArmed);
       armButton.classList.toggle("arm-disarmed", !flightArmed);
       armButton.setAttribute("aria-pressed", String(flightArmed));
-      alignImuButton.disabled = flightArmed;
     }
 
     armButton.onclick = async () => {
@@ -620,23 +615,10 @@
           y: gyroscope.y - gyroBias.y,
           z: gyroscope.z - gyroBias.z,
         };
-        const accelerationRoll = Math.atan2(
-          acceleration.y, acceleration.z
-        ) * 180 / Math.PI;
-        const accelerationPitch = Math.atan2(
-          -acceleration.x,
-          Math.hypot(acceleration.y, acceleration.z)
-        ) * 180 / Math.PI;
-        roll = .98 * (roll + correctedGyroscope.x * dt)
-          + .02 * accelerationRoll;
-        pitch = .98 * (pitch + correctedGyroscope.y * dt)
-          + .02 * accelerationPitch;
+        /* Draw the exact filtered attitude used for motor stabilization. */
+        roll = sample.attitude.roll;
+        pitch = sample.attitude.pitch;
         yaw = (yaw + correctedGyroscope.z * dt + 360) % 360;
-        if (settledLevel) {
-          const alignWeight = Math.min(dt / 20, 1);
-          roll *= 1 - alignWeight;
-          pitch *= 1 - alignWeight;
-        }
         telemetryValues.textContent =
           `A ${acceleration.x.toFixed(2)} ${acceleration.y.toFixed(2)} `
           + `${acceleration.z.toFixed(2)} g\n`
@@ -654,9 +636,9 @@
       clearInterval(telemetryTimer);
       telemetryTimer = undefined;
       telemetryElement.classList.toggle("disabled", !enabled);
-      attitudeToggle.setAttribute("aria-pressed", String(enabled));
-      attitudeToggle.textContent =
-        enabled ? "Disable attitude" : "Enable attitude";
+      telemetryElement.setAttribute("aria-pressed", String(enabled));
+      telemetryElement.setAttribute("aria-label",
+        `${enabled ? "Disable" : "Enable"} attitude indicator`);
 
       if (enabled) {
         roll = 0;
@@ -675,8 +657,14 @@
         );
       }
     }
-    attitudeToggle.addEventListener("click", () => {
+    telemetryElement.addEventListener("click", () => {
       setTelemetryEnabled(!telemetryEnabled);
+    });
+    telemetryElement.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        setTelemetryEnabled(!telemetryEnabled);
+      }
     });
 
     function fullscreenChanged() {
@@ -717,6 +705,7 @@
           / (bounds.width / 2);
         let y = (bounds.top + bounds.height / 2 - event.clientY)
           / (bounds.height / 2);
+        if (stick.dataset.stick === "left" && turnLocked) x = 0;
         const magnitude = Math.hypot(x, y);
         if (magnitude > 1) {
           x /= magnitude;
@@ -728,7 +717,9 @@
         const now = performance.now();
         if (now - lastSentAt >= 50) {
           lastSentAt = now;
-          send(name, { x: +x.toFixed(3), y: +y.toFixed(3) });
+          send(name, {
+            x: +currentX.toFixed(3), y: +currentY.toFixed(3)
+          });
         }
       }
 
@@ -748,6 +739,11 @@
       };
 
       if (stick.dataset.stick === "left") {
+        lockTurnControl = async () => {
+          currentX = 0;
+          render();
+          await send(name, { x: 0, y: +currentY.toFixed(3) });
+        };
         resetThrottleControl = async () => {
           currentX = 0;
           currentY = -1;

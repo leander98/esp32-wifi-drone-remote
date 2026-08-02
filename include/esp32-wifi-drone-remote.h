@@ -53,6 +53,9 @@ typedef struct {
     float gyroscope_x;
     float gyroscope_y;
     float gyroscope_z;
+    /** Filtered attitude used by the flight controller, in degrees. */
+    float roll_degrees;
+    float pitch_degrees;
 } esp32_wifi_drone_remote_telemetry_t;
 
 /**

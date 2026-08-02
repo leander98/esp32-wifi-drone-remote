@@ -272,14 +272,16 @@ static esp_err_t telemetry_handler(httpd_req_t *request)
         return httpd_resp_sendstr(request, esp_err_to_name(err));
     }
 
-    char response[224];
+    char response[288];
     int length = snprintf(
         response, sizeof(response),
         "{\"accelerometer\":{\"x\":%.5f,\"y\":%.5f,\"z\":%.5f},"
-        "\"gyroscope\":{\"x\":%.5f,\"y\":%.5f,\"z\":%.5f}}",
+        "\"gyroscope\":{\"x\":%.5f,\"y\":%.5f,\"z\":%.5f},"
+        "\"attitude\":{\"roll\":%.5f,\"pitch\":%.5f}}",
         telemetry.acceleration_x, telemetry.acceleration_y,
         telemetry.acceleration_z, telemetry.gyroscope_x,
-        telemetry.gyroscope_y, telemetry.gyroscope_z);
+        telemetry.gyroscope_y, telemetry.gyroscope_z,
+        telemetry.roll_degrees, telemetry.pitch_degrees);
     httpd_resp_set_type(request, "application/json");
     httpd_resp_set_hdr(request, "Cache-Control", "no-store");
     return httpd_resp_send(request, response, length);
