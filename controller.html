@@ -291,6 +291,8 @@
     let previousTelemetryAt;
     let levelCandidateSince;
     let turnLocked = false;
+    /* Frame-to-display pitch trim; does not affect flight control. */
+    const attitudePitchOffsetDegrees = -20;
 
     turnLockButton.onclick = () => {
       turnLocked = !turnLocked;
@@ -613,7 +615,7 @@
         };
         /* Draw the exact filtered attitude used for motor stabilization. */
         roll = sample.attitude.roll;
-        pitch = sample.attitude.pitch;
+        pitch = sample.attitude.pitch + attitudePitchOffsetDegrees;
         yaw = (yaw + correctedGyroscope.z * dt + 360) % 360;
         telemetryValues.textContent =
           `A ${acceleration.x.toFixed(2)} ${acceleration.y.toFixed(2)} `
